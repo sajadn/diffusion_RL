@@ -1,0 +1,38 @@
+# Block JustGRPO-Fast on DeepScaleR, ASYNC vLLM + async-GRPO, 16 training + 2
+# generation nodes -- the 22-Jul production configuration, with checkpoint
+# retention raised so the run can actually be resumed and swept.
+#
+# RETENTION IS THE ONLY CHANGE. The parent already carries everything the
+# evidence supports: fast_entropy_level_ratio 0.5 (m = ceil(0.5*16) = 8 of 16
+# reveal levels) and the 16+2 topology.
+#
+# WHY 0.5 AND NOT 0.25. Paired against the same 30 AIME2024 validation problems
+# at matched steps, ratio 0.5 beat 0.25 at 9 of 12 validations (2 losses, both
+# at steps 10-20 before either had learned; 1 tie), and the gap widened with
+# training: +0.023 at step 90, +0.040 at 110, +0.031 at 120. Mean of the last
+# four validations: 0.1807 vs 0.1573. The throughput argument does not rescue
+# 0.25 either -- even granting it ~50s/step against 0.5's ~71s, it reaches only
+# ~step 170 in 0.5's step-120 wall clock, extrapolating to ~0.193 vs 0.202.
+#
+# WHY 2 GENERATION NODES AND NOT 4. Job 16658628 ran this algorithm at 16+4:
+# step 71.6s vs 70.9s at 16+2, with exposed_generation 1.04s. At ratio 0.5 the
+# trainer is the critical path (policy_training 52.7s = 73.6% of the step), so
+# generation is already fully hidden and extra generation nodes sit idle.
+#
+# keep_top_k 40 (parent chain default is 2). The 22-Jul Fast runs kept only two
+# checkpoints each, which is why deepscaler_bjgf025_3b_vllm_asyncgrpo survives
+# only as step_80 and step_120. At save_period 10 this covers through step 400.
+# Disk: 40 x ~43 GB = ~1.7 TB.
+#
+# Submit: NODES=18, ENV_TAG=mb_3rdparty_vllm_local_fork_fixed,
+#         NRL_VLLM_PY_EXECUTABLE=<vllm runtime>/bin/python-compat (exported).
+defaults: "deepscaler_nemotron_labs_diffusion_3b_vllm_block_just_grpo_fast_async_grpo_megatron.yaml"
+
+checkpointing:
+  keep_top_k: 40
+  checkpoint_dir: "results/grpo-nd3b-bjgf-deepscaler-vllm-async-16t2g-kt40"
+
+logger:
+  log_dir: "logs/grpo-nd3b-bjgf-deepscaler-vllm-async-16t2g-kt40"
+  wandb:
+    name: "grpo-nd3b-bjgf-deepscaler-vllm-async-16t2g-kt40"

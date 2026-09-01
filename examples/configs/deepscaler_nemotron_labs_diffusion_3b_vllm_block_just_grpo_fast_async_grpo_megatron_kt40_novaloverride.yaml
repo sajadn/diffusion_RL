@@ -1,0 +1,46 @@
+# Block JustGRPO-Fast on DeepScaleR, ASYNC vLLM + async-GRPO, 16 training + 2
+# generation nodes, with the validation-time engine reconfigure DISABLED.
+#
+# ONLY CHANGE vs the kt40 config: vllm_val_dllm_overrides: null.
+# keep_top_k 40, checkpointing, max_num_steps and everything else are inherited
+# untouched. (The throwaway diagnostic sibling ..._novaloverride.yaml also set
+# checkpointing.enabled false and max_num_steps 30 -- do NOT use that one for
+# training.)
+#
+# WHY. The kt40 run showed gen_kl_error spiking ~180x (5e-4 baseline -> ~9e-2,
+# max 0.41) at steps 12, 22, 32, ... -- exactly 2 steps after every validation,
+# 25 spikes in 273 steps. The 22-Jul run had ZERO spikes in 128 steps, and the
+# only relevant difference was that vllm_val_dllm_overrides did not yet exist in
+# the chain. A controlled 18-node diagnostic (job 16696634) with the override
+# disabled and everything else identical produced NO spikes at steps 12 or 22
+# (0.0005 / 0.0009 vs kt40's 0.0895 / 0.0869), confirming the cause: swapping
+# the live engines to confidence_threshold for validation and restoring leftmost
+# afterwards corrupts the trajectories in flight across that window. Their
+# generation logprobs no longer match the policy the trainer attributes them to,
+# and they enter training ~2 steps later (staleness + buffering lag), so ~10% of
+# steps trained on mismatched data.
+#
+# COST OF THIS FIX: validation now decodes with the ROLLOUT policy (leftmost)
+# rather than the fixed confidence-0.9 protocol. Val accuracy is therefore
+# comparable to the 22-Jul run and NOT to kt40, and not comparable across runs
+# that roll out with different selection policies. The alternative fix -- keep
+# the fixed protocol but have the async collector discard trajectories generated
+# across the reconfigure window -- needs a code change in the collector drain
+# path and is not attempted here.
+#
+# NOT FIXED HERE: length inflation. As of step ~269 the run had mean response
+# 1800 tokens with 16-21% of rollouts hitting the 3744 cap, and reward had
+# turned over (peak 0.5370 at steps 201-220, down to 0.4982 by 241-260). A probe
+# of generation-vs-recomputed logprobs found EOS positions are the BEST matched
+# bucket (p95 |gap| 1.0 nats vs 7.0 mid-response), so the truncated final block
+# in the logprob path is NOT biasing the stop signal. The inflation looks like
+# the ordinary RL dynamic meeting the 4096 sequence budget; AR hit the same wall
+# (10.9% at step 302) and recovered on its own to 6.4% by step 603.
+#
+# Submit: NODES=18, ENV_TAG=mb_3rdparty_vllm_local_fork_fixed,
+#         NRL_VLLM_PY_EXECUTABLE=<vllm runtime>/bin/python-compat (exported).
+defaults: "deepscaler_nemotron_labs_diffusion_3b_vllm_block_just_grpo_fast_async_grpo_megatron_kt40.yaml"
+
+policy:
+  generation:
+    vllm_val_dllm_overrides: null

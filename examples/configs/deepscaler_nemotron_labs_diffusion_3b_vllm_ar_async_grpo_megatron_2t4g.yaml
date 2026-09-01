@@ -1,0 +1,93 @@
+# AR GRPO on DeepScaleR (AIME2024 val) with ASYNC vLLM generation + async-GRPO,
+# rebalanced to 2 training + 4 generation nodes.
+#
+# The async / vLLM / AR-decode overlay is inherited from the MATH-AGRPO async
+# config: async_grpo.enabled + max_trajectory_age_steps 1, TIS ratio 2.0,
+# vllm_cfg.async_engine, diffusion_config: null +
+# hf_overrides.architectures NemotronLabsDiffusionForCausalLM. This file swaps
+# the data back to DeepScaleR train / AIME2024 val and re-provisions generation.
+#
+# TOPOLOGY: 6 nodes = 2 training + 4 generation (the parent runs 2 + 2).
+# Sized from the math_agrpo_ar_4n run (job 15287275), where at 2 gen nodes:
+#   generation worker group 17.65K tok/s vs 851K generated tokens/step
+#     -> ~48s of generation work inside a 53s step (~92% duty cycle)
+#   training side (policy_training 16.9s + logprobs 4.9s + prep) -> ~22.8s
+# i.e. generation was the critical path by ~2.1x while the 16 training GPUs sat
+# idle ~57% of every step. Balancing needs 851K tokens in <=22.8s = 37.3K tok/s
+# = ~34 GPUs at the observed 1103 tok/s/gpu, so 4 generation nodes is the
+# balance point. Expected step time ~25-28s (floor is the 22.8s training side;
+# more than 4 gen nodes buys nothing without also scaling training).
+# Mean response length grew 579 -> 734 tokens over that run, so 2 gen nodes
+# degrades as training progresses -- 4 leaves headroom for the growth.
+#
+# MEASURED OUTCOME (job 16512002): the extra generation nodes did NOT deliver
+# the predicted 2x. Per-GPU generation throughput fell 1103 -> 688 tok/s because
+# per-engine concurrency halves (1024 rollouts over 32 engines instead of 16),
+# so aggregate rose only ~1.25x and step time went 53s -> ~45s -- about 22%
+# worse per node-hour. The cheaper configuration to test is 2 generation nodes
+# with max_num_seqs 64.
+#
+# max_num_seqs 32 -> 64: the engines report GPU KV cache 363,024 tokens =
+# "Maximum concurrency for 4,096 tokens per request: 88.63x", so 32 used only
+# ~36% of the concurrency already paid for. 64 stays under the 88x worst case,
+# so no preemption even if every request runs to the full 4096, and
+# gpu_memory_utilization can stay at 0.55. Overridden here rather than in
+# nemotron_labs_diffusion_3b_vllm_generation_common.yaml because that mixin is
+# shared with the diffusion configs, where max_num_seqs interacts with canvas
+# memory.
+#
+# keep_top_k 40 (parent chain default is 2), ranked by val:accuracy. NOTE this
+# evicts the LOWEST-AR-val checkpoints, which the offline eval found are often
+# the BEST under greedy diffusion decoding (Pearson r = -0.15 over steps
+# 200-400) -- step_200 was auto-evicted despite topping the diffusion ranking.
+# Copy out anything you care about before starting another leg.
+#
+# Validation decodes with the rollout policy (AR, T=1.0 / top_p 1.0 from the
+# inherited generation settings -- NOT greedy): the inherited sglang_cfg /
+# sglang_val_dllm_overrides are inert once the backend is vllm, so val numbers
+# are NOT directly comparable to the SGLang deepscaler AR runs. Offline
+# replication needs TEMP=1.0 with 16 seeds (avg@16), not TEMP=0.
+#
+# Submit: NODES=6, ENV_TAG=mb_3rdparty_vllm_local_fork_fixed,
+#         NRL_VLLM_PY_EXECUTABLE=<vllm runtime>/bin/python-compat (exported).
+defaults: "math500_nemotron_labs_diffusion_3b_vllm_ar_async_grpo_math_agrpo.yaml"
+
+data:
+  # Fully replace the parent block so its MATH-AGRPO / MATH-500 data_path
+  # entries cannot leak into the DeepScaler / AIME2024 loaders (same
+  # _override_ pattern the SGLang deepscaler AR config uses on gsm8k).
+  _override_: true
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  max_input_seq_length: 350
+  train:
+    dataset_name: DeepScaler
+  validation:
+    dataset_name: AIME2024
+    repeat: 16
+  default:
+    prompt_file: "examples/prompts/cot.txt"
+    system_prompt_file: null
+    processor: "math_hf_data_processor"
+    env_name: "math"
+
+policy:
+  generation:
+    colocated:
+      resources:
+        num_nodes: 4   # dedicated generation nodes (was 2)
+    vllm_kwargs:
+      max_num_seqs: 64
+
+cluster:
+  num_nodes: 6   # 2 training + 4 generation
+
+checkpointing:
+  keep_top_k: 40
+  checkpoint_dir: "results/grpo-nd3b-ar-deepscaler-vllm-async-grpo-2t4g"
+
+logger:
+  log_dir: "logs/grpo-nd3b-ar-deepscaler-vllm-async-grpo-2t4g"
+  wandb:
+    name: "grpo-nd3b-ar-deepscaler-vllm-async-grpo-2t4g"
