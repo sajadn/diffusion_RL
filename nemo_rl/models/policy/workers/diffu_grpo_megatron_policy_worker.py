@@ -75,21 +75,26 @@ class DiffuGRPOMegatronPolicyWorkerImpl(DiffusionMegatronPolicyWorkerImpl):
         if not torch.all(noisy_response_offsets == noisy_response_offsets[0]):
             raise ValueError("diffuGRPO noisy response offset must be constant within a microbatch")
 
-        for module in self._diffusion_attention_modules(self.model):
+        modules = list(self._diffusion_attention_modules(self.model))
+        for module in modules:
             if not hasattr(module, "set_asymmetric_ar_metadata"):
                 raise RuntimeError(
                     "DiffuGRPO completion-only replay requires "
                     "NemotronLabsDiffusionAttention.set_asymmetric_ar_metadata"
                 )
-            module.set_asymmetric_ar_metadata(
-                noisy_length=int(noisy_lengths[0].item()),
-                clean_length=int(clean_padded_lengths[0].item()),
-                noisy_response_offset=int(noisy_response_offsets[0].item()),
-                prompt_lengths=data_dict["diffu_grpo_completion_starts"],
-                response_lengths=data_dict["diffu_grpo_response_lengths"],
-                noisy_valid_lengths=noisy_valid_lengths,
-                clean_lengths=data_dict["diffu_grpo_clean_lengths"],
-            )
+        # Built once and handed to every layer, so the L layers read one dict
+        # rather than L copies of the same values (and validation runs once).
+        metadata = type(modules[0]).build_asymmetric_ar_metadata(
+            noisy_length=int(noisy_lengths[0].item()),
+            clean_length=int(clean_padded_lengths[0].item()),
+            noisy_response_offset=int(noisy_response_offsets[0].item()),
+            prompt_lengths=data_dict["diffu_grpo_completion_starts"],
+            response_lengths=data_dict["diffu_grpo_response_lengths"],
+            noisy_valid_lengths=noisy_valid_lengths,
+            clean_lengths=data_dict["diffu_grpo_clean_lengths"],
+        )
+        for module in modules:
+            module.set_asymmetric_ar_metadata(metadata)
 
     def _clear_asymmetric_ar_metadata(self) -> None:
         for module in self._diffusion_attention_modules(self.model):

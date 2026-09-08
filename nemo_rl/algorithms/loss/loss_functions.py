@@ -529,9 +529,20 @@ class ClippedPGLossFn(LossFunction):
         # -------------------------------------------------------------
         _is_filter_metrics: dict = {}  # populated for icepop / seq-mask-tis
         # See: docs/guides/grpo.md#importance-sampling-correction
+        # Sentinel guard, mirroring the ``< 0.5`` filter the KL metrics apply above: in
+        # SGLang ``logprob_mode=final_step`` (CoupledGRPO / ESPO) the positions that were
+        # committed before their block's last denoising step carry a ``+1`` sentinel
+        # instead of a real behaviour logprob, so ``exp(prev - gen)`` would evaluate a
+        # meaningless ``exp(prev - 1)`` there. The behaviour distribution is unknown at
+        # those positions, so fall back to ``prev`` (weight 1.0 = no correction) and let
+        # only the real final-step positions be corrected. No-op for every path whose
+        # generation logprobs are real (``<= 0``).
+        is_generation_logprobs = torch.where(
+            generation_logprobs < 0.5, generation_logprobs, prev_logprobs
+        )
         if self.sequence_level_importance_ratios:
             # importance weight w_i = exp(Σ_t (log π_actor − log π_behaviour))
-            seq_lp_diff = ((prev_logprobs - generation_logprobs) * mask).sum(dim=-1)
+            seq_lp_diff = ((prev_logprobs - is_generation_logprobs) * mask).sum(dim=-1)
             actor_importance_weights = torch.exp(seq_lp_diff).detach()
             actor_importance_weights = torch.nan_to_num(
                 actor_importance_weights, nan=0.0, posinf=0.0, neginf=0.0
@@ -541,7 +552,7 @@ class ClippedPGLossFn(LossFunction):
         else:
             # Token-level correction
             actor_importance_weights_expanded = torch.exp(
-                prev_logprobs - generation_logprobs
+                prev_logprobs - is_generation_logprobs
             )
             actor_importance_weights_expanded = torch.nan_to_num(
                 actor_importance_weights_expanded, nan=0.0, posinf=0.0, neginf=0.0

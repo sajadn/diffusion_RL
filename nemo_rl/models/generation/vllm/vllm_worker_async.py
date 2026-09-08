@@ -480,6 +480,19 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
         serving_chat_kwargs = serving_chat_default_kwargs | self.cfg["vllm_cfg"].get(
             "http_server_serving_chat_kwargs", dict()
         )
+        # chat_template may be given as a FILE PATH or as literal template text.
+        # vLLM's own entrypoints resolve this via load_chat_template (see
+        # openai/api_server.py:395 and entrypoints/llm.py:363); passing the raw
+        # string through instead makes a path BECOME the template -- it contains
+        # no jinja syntax, so it renders to itself and every prompt collapses to
+        # the path followed by <|im_end|> padding, with no <|im_start|> at all.
+        # That failure is silent: the run trains happily on garbage prompts.
+        if serving_chat_kwargs.get("chat_template"):
+            from vllm.entrypoints.chat_utils import load_chat_template
+
+            serving_chat_kwargs["chat_template"] = load_chat_template(
+                serving_chat_kwargs["chat_template"]
+            )
         # vLLM >=0.24: chat/tokenize serving objects delegate message
         # preprocessing to a shared OnlineRenderer (built from the engine's
         # renderer + model_config), which they now require as a constructor arg.

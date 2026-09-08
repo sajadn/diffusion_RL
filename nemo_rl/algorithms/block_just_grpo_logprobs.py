@@ -207,9 +207,16 @@ def build_block_reveal_base(
 ) -> tuple[BatchedDataDict[Any], int, int, torch.Tensor | None]:
     """Build the fully-masked completion ``base`` (N rows) + level count.
 
-    The noisy side is *not* block-padded (``block_size=None`` is forwarded to the
-    completion-batch builder) so the final partial block is truncated at the last
-    response token -- matching the per-token leftmost-reveal attention length.
+    The noisy side IS block-padded (``block_size`` is forwarded to the
+    completion-batch builder) so the final partial block is filled out to a whole
+    block with MASK tokens, matching what generation conditions on: the decoder
+    always works on a full ``canvas_length`` canvas, so when it commits the last
+    real token the remaining offsets of that block are still MASK and are
+    attended to. Truncating instead (the previous behaviour) scored that token on
+    a shorter context than it was generated with. The pad is mask-filled and
+    excluded from ``token_mask`` / ``score_mask``, and
+    ``diffu_grpo_response_lengths`` keeps the TRUE length, so reveal bounds, the
+    Fast top-k offsets and ``num_levels`` are unaffected.
     Block structure for the attention mask comes from the model module's
     ``block_size``, not from noisy padding. Returns ``(base, num_samples,
     num_levels, selected_offsets)`` -- ``selected_offsets`` is the ``[N,
@@ -223,7 +230,7 @@ def build_block_reveal_base(
             mask_token_id=mask_token_id,
             pad_token_id=pad_token_id,
             pad_to_length=pad_to_length,
-            block_size=None,
+            block_size=block_size,
         )
     else:
         base = build_fully_masked_completion_batch(
@@ -231,7 +238,7 @@ def build_block_reveal_base(
             mask_token_id=mask_token_id,
             pad_token_id=pad_token_id,
             pad_to_length=pad_to_length,
-            block_size=None,
+            block_size=block_size,
         )
     num_samples = base["input_ids"].shape[0]
     num_levels = count_reveal_levels(

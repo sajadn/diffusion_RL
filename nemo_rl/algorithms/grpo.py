@@ -926,6 +926,33 @@ def setup(
             **(generation_config["vllm_kwargs"].get("hf_overrides") or {}),
         }
 
+        ## Block-size agreement between the rollout canvas and the training
+        ## estimator. These are pinned INDEPENDENTLY and neither derives from
+        ## the other: the fork sets ``canvas_length = block_size`` while
+        ## constructing the HF config (transformers_utils/configs/
+        ## nemotron_labs_diffusion.py), i.e. BEFORE hf_overrides is applied, so
+        ## the merge above does NOT propagate the training block size to the
+        ## rollout canvas. A config that pins only one side rolls out at the
+        ## checkpoint's own block_size (32 for v1.5-sft) against an estimator
+        ## expecting the override (16) -- silently wrong logprobs, not an error.
+        ## diffusion_config is None on AR runs (no canvas), which is exempt.
+        _diffusion_cfg = generation_config["vllm_kwargs"].get("diffusion_config")
+        if isinstance(_diffusion_cfg, dict):
+            _train_block = (policy_config.get("hf_config_overrides") or {}).get(
+                "block_size"
+            )
+            _gen_canvas = _diffusion_cfg.get("canvas_length")
+            if _train_block is not None or _gen_canvas is not None:
+                assert _train_block == _gen_canvas, (
+                    "Diffusion block size mismatch between generation and training: "
+                    f"policy.generation.vllm_kwargs.diffusion_config.canvas_length="
+                    f"{_gen_canvas} vs policy.hf_config_overrides.block_size="
+                    f"{_train_block}. Both must be set and equal -- the vLLM engine "
+                    "derives canvas_length from the checkpoint config before "
+                    "hf_overrides is applied, so pinning only one side leaves the "
+                    "other at the checkpoint default."
+                )
+
         # Optionally launch the validation-only engine group first, while GPU
         # memory is still clean, then put it to sleep so the rollout engines and
         # the policy can initialize as usual. Built after hf_overrides is set so
