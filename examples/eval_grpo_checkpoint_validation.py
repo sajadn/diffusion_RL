@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--benchmark",
         default="gsm8k",
-        choices=("gsm8k", "aime24", "aime2024", "aime25", "aime2025"),
+        choices=("gsm8k", "aime24", "aime2024", "aime25", "aime2025", "aime26", "aime2026", "ifbench", "lcb", "livecodebench", "aa_lcr", "aalcr"),
         help="Evaluation benchmark to load.",
     )
     parser.add_argument("--num-samples", type=int, default=-1)
@@ -112,6 +112,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--selection-policy", default="confidence")
     parser.add_argument("--causal-context", default="true")
+    parser.add_argument(
+        "--enable-thinking",
+        default="true",
+        choices=("true", "false"),
+        help=(
+            "Chat-template enable_thinking flag. "
+            "true keeps the <think> generation prefix; false emits <think></think>."
+        ),
+    )
 
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--mem-fraction-static", default="0.55")
@@ -125,6 +134,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shard-rank", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
+
+
+# Benchmarks graded by a separate offline pass rather than math_verify.
+OFFLINE_SCORED_BENCHMARKS = frozenset({"ifbench", "livecodebench", "aa_lcr"})
 
 
 def load_prompt_template(path: Path) -> str:
@@ -163,14 +176,25 @@ def select_validation_shard(
 
 
 def make_prompt_ids(
-    tokenizer: Any, prompt_template: str, question: str
+    tokenizer: Any,
+    prompt_template: str,
+    question: str,
+    enable_thinking: bool = True,
+    system_message: str | None = None,
 ) -> tuple[str, list[int]]:
     formatted_content = prompt_template.format(question)
+    messages: list[dict[str, str]] = []
+    if system_message:
+        # LiveCodeBench prompts carry their own system message; without one the chat
+        # template substitutes its generic default.
+        messages.append({"role": "system", "content": system_message})
+    messages.append({"role": "user", "content": formatted_content})
     message = tokenizer.apply_chat_template(
-        [{"role": "user", "content": formatted_content}],
+        messages,
         tokenize=False,
         add_generation_prompt=True,
         add_special_tokens=False,
+        enable_thinking=enable_thinking,
     )
     token_ids = tokenizer(
         message,
@@ -289,8 +313,17 @@ def server_command(args: argparse.Namespace, dllm_config: Path | None) -> list[s
                 '{"architectures": ["NemotronLabsDiffusionForCausalLM"]}',
             ]
         elif args.dllm_algorithm == "FastDiffuser":
-            # Diffusion decode: load the block-diffusion model class (no arch
-            # override) and pass the decode policy as the engine diffusion_config.
+            # Diffusion decode: load the block-diffusion model class and pass the
+            # decode policy as the engine diffusion_config.
+            # The checkpoint's own architectures entry (MinistralDiffEncoderModel
+            # for the ministral_dlm family) is not in the vLLM fork registry, so
+            # name the block-diffusion class explicitly -- the registry maps
+            # NemotronLabsDiffusionModel -> NemotronLabsDiffusionForBlockDiffusion.
+            # Mirrors the AR branch above, which overrides to the causal-LM class.
+            cmd += [
+                "--hf-overrides",
+                '{"architectures": ["NemotronLabsDiffusionModel"]}',
+            ]
             # Map SGLang selection_policy naming to vLLM names.
             vllm_selection = {"confidence": "confidence_threshold"}.get(
                 args.selection_policy, args.selection_policy
@@ -304,6 +337,15 @@ def server_command(args: argparse.Namespace, dllm_config: Path | None) -> list[s
             if vllm_selection == "confidence_threshold":
                 diffusion_config["confidence_threshold"] = args.threshold
             cmd += ["--diffusion-config", json.dumps(diffusion_config)]
+            # Block diffusion passes a per-sequence is_causal TENSOR (causal across
+            # blocks, bidirectional within), which the FlashAttention-3 kernel
+            # rejects -- it wants a scalar bool. This vLLM version dropped the
+            # VLLM_ATTENTION_BACKEND env var for a CLI flag, so setting the env
+            # var is silently ignored and the default FA3 backend crashes engine
+            # init. Pin the backend the training configs validate the diffusion
+            # path on (nemotron_labs_diffusion_3b_vllm_generation_common.yaml:
+            # attention_backend TRITON_ATTN).
+            cmd += ["--attention-backend", "TRITON_ATTN"]
         else:
             raise ValueError(
                 "vLLM backend supports --dllm-algorithm AR or FastDiffuser, "
@@ -498,6 +540,7 @@ def generate_one_chat_completions(
         "temperature": temperature,
         "top_p": top_p,
         "max_tokens": max_new_tokens,
+        "chat_template_kwargs": {"enable_thinking": args.enable_thinking == "true"},
     }
     if args.backend != "vllm":
         payload.update(
@@ -609,7 +652,13 @@ def main() -> None:
         started = time.time()
 
         def work(i: int, original_idx: int, sample: dict[str, str]) -> tuple[int, dict[str, Any]]:
-            prompt, input_ids = make_prompt_ids(tokenizer, prompt_template, sample["question"])
+            prompt, input_ids = make_prompt_ids(
+                tokenizer,
+                prompt_template,
+                sample["question"],
+                enable_thinking=args.enable_thinking == "true",
+                system_message=sample.get("system_message"),
+            )
             output_ids: list[int] = []
             if args.generation_api == "chat_completions":
                 result = generate_one_chat_completions(
@@ -664,9 +713,15 @@ def main() -> None:
                 ]
                 for fut in concurrent.futures.as_completed(futures):
                     i, record = fut.result()
-                    score, extracted = score_response(verify_func, record["response"], record["gold"])
-                    record["reward"] = score
-                    record["extracted"] = repr(extracted)
+                    if args.benchmark in OFFLINE_SCORED_BENCHMARKS:
+                        record["reward"] = None
+                        record["extracted"] = None
+                    else:
+                        score, extracted = score_response(
+                            verify_func, record["response"], record["gold"]
+                        )
+                        record["reward"] = score
+                        record["extracted"] = repr(extracted)
                     records[i] = record
                     done += 1
                     if done % 100 == 0 or done == len(indexed_samples):
@@ -676,10 +731,11 @@ def main() -> None:
         total = len(records)
         avg_len = sum(len(r["output_ids"]) for r in records) / max(total, 1)
         elapsed = time.time() - started
+        offline_scored = args.benchmark in OFFLINE_SCORED_BENCHMARKS
         metrics = {
             "benchmark": args.benchmark,
-            "accuracy": correct / total if total else 0.0,
-            "correct": correct,
+            "accuracy": None if offline_scored else (correct / total if total else 0.0),
+            "correct": None if offline_scored else correct,
             "total": total,
             "avg_generation_tokens": avg_len,
             "elapsed_seconds": elapsed,
@@ -693,9 +749,18 @@ def main() -> None:
         with open(args.outdir / "metrics.json", "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2, default=str)
 
-        print(
-            f"{args.benchmark} Accuracy: {correct}/{total} = {100 * metrics['accuracy']:.4f}%"
-        )
+        if offline_scored:
+            metrics["scoring"] = (
+                "offline; grade records.jsonl with tools/ifbench/score_ifbench.py"
+            )
+            print(
+                f"{args.benchmark}: generated {total} responses; "
+                "accuracy is computed by the offline scorer, not this job."
+            )
+        else:
+            print(
+                f"{args.benchmark} Accuracy: {correct}/{total} = {100 * metrics['accuracy']:.4f}%"
+            )
         print(f"Average generation length: {avg_len:.1f} tokens")
         print(f"Metrics: {args.outdir / 'metrics.json'}")
         print(f"Records: {args.outdir / 'records.jsonl'}")

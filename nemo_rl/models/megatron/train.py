@@ -509,6 +509,15 @@ class LogprobsPostProcessor:
                     vocab_end_index=(tp_rank + 1) * output_tensor.shape[-1],
                     tp_group=tp_grp,
                     inference_only=True,
+                    # Unpacked CP: without this, cp_size collapses to 1, the
+                    # target is never zigzag-sliced to match the CP-sharded
+                    # logits, and the gather in model_utils.py:138 fails with
+                    # index [B, S, 1] vs self [B, S/cp, V/tp]. The packed branch
+                    # above already passes it. from_parallel_logits_to_logprobs
+                    # rolls the target BEFORE slicing, so the AR shift stays
+                    # correct across CP chunk boundaries, and it all-gathers the
+                    # [B, S] result internally. No-op at cp_size == 1.
+                    cp_group=get_context_parallel_group(),
                     chunk_size=logprob_chunk_size,
                     sampling_params=self.sampling_params,
                 )
