@@ -453,6 +453,14 @@ class AsyncTrajectoryCollector:
                         if not self.running:
                             break
 
+                    # Re-check the pause. The refit and generation-limit waits
+                    # above park this thread for a whole step, so a pause that
+                    # lands while it is parked is invisible to the check at the
+                    # top of the loop -- which is how a full batch used to be
+                    # launched straight into the validation window.
+                    if not self._manual_pause_cleared.is_set() and self.running:
+                        self._manual_pause_cleared.wait()
+
                     if not self.running:
                         break
 
@@ -532,9 +540,7 @@ class AsyncTrajectoryCollector:
                     ),
                     daemon=True,
                 )
-                with self._threads_lock:
-                    self._inflight_threads.add(worker)
-                worker.start()
+                self._start_worker_when_unpaused(worker)
 
             self._cleanup_finished_threads()
 
@@ -547,9 +553,42 @@ class AsyncTrajectoryCollector:
     def get_weight_version(self) -> int:
         return self.current_weight_version
 
+    def _start_worker_when_unpaused(self, worker: _threading.Thread) -> None:
+        """Register and start `worker`, blocking for as long as collection is paused.
+
+        The pause check and the registration happen under `_threads_lock` -- the
+        lock `pause` and `wait_for_pending_generations` also take -- so a
+        generation cannot slip between them. Were they separate, a generation
+        could pass the check, the pause could land, the drain could observe an
+        empty in-flight set, and the generation would then start inside the very
+        window the drain exists to protect.
+
+        Args:
+            worker: An unstarted generation thread.
+        """
+        while True:
+            with self._threads_lock:
+                if self._manual_pause_cleared.is_set():
+                    self._inflight_threads.add(worker)
+                    # start() has to be inside the lock as well:
+                    # wait_for_pending_generations drains on is_alive(), and an
+                    # unstarted thread reads as not alive, so a drain landing
+                    # between the add and the start would discard this worker as
+                    # already finished.
+                    worker.start()
+                    return
+            self._manual_pause_cleared.wait()
+
     def pause(self) -> None:
-        """Pause trajectory collection."""
-        self._manual_pause_cleared.clear()  # Signal collection to pause
+        """Pause trajectory collection.
+
+        The flag is cleared under `_threads_lock` so this orders against
+        `_start_worker_when_unpaused`: once it returns, every generation is
+        either already registered (and so visible to a following drain) or
+        blocked until `resume`.
+        """
+        with self._threads_lock:
+            self._manual_pause_cleared.clear()  # Signal collection to pause
         print("Trajectory collection paused")
 
     def pause_and_drain(self) -> None:
@@ -561,6 +600,12 @@ class AsyncTrajectoryCollector:
         has to wait for them: otherwise part of a training trajectory is
         generated under the validation policy, and the importance-sampling
         correction has no way to see it.
+
+        Once this returns nothing is generating AND nothing can start until
+        `resume`, which is the guarantee the caller needs. Draining alone is not
+        enough: the collection loop parks on the refit and generation-limit
+        waits, so it can be sitting on a batch it is about to launch at the
+        moment the drain finds the in-flight set empty.
 
         Unlike `pause`, call this with a blocking `ray.get`.
         """

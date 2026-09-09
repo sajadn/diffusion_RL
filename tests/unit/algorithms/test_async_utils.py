@@ -698,3 +698,121 @@ class TestAsyncUtilsIntegration:
         assert sample_result is None
 
         ray.kill(buffer)
+
+
+class TestPauseBarrier:
+    """The pause/drain barrier the validation-time engine reconfigure relies on.
+
+    `grpo.py` drains the collector before switching the diffusion decode policy
+    for validation and restores it afterwards. If any rollout is generated
+    across that window, its generation logprobs describe a policy the trainer
+    never attributes them to, which surfaces two steps later as a gen_kl_error
+    spike. These tests pin the barrier that prevents it.
+
+    They drive the collector's threading directly rather than through Ray, since
+    the failure is entirely internal to the actor's own threads.
+    """
+
+    def create_collector(self):
+        """An unstarted collector instance, outside Ray."""
+        collector_cls = AsyncTrajectoryCollector.__ray_metadata__.modified_class
+        collector = collector_cls(
+            policy_generation=mock.MagicMock(),
+            tokenizer=mock.MagicMock(),
+            task_to_env={"test": mock.MagicMock()},
+            master_config={
+                "grpo": {
+                    "num_prompts_per_step": 2,
+                    "num_generations_per_prompt": 2,
+                    "max_rollout_turns": 1,
+                    "max_num_epochs": 1,
+                    "async_grpo": {"max_trajectory_age_steps": 1},
+                },
+                "policy": {"max_total_sequence_length": 512},
+            },
+            replay_buffer=mock.MagicMock(),
+            start_step=0,
+        )
+        collector.running = True
+        return collector
+
+    def test_paused_collector_starts_no_generation(self):
+        """A worker offered while paused must not run until resume."""
+        collector = self.create_collector()
+        started = threading.Event()
+        worker = threading.Thread(target=started.set, daemon=True)
+
+        collector.pause()
+        offer = threading.Thread(
+            target=collector._start_worker_when_unpaused, args=(worker,), daemon=True
+        )
+        offer.start()
+
+        assert not started.wait(timeout=0.5), (
+            "generation started while collection was paused"
+        )
+        # And the drain agrees there is nothing to wait for, so a caller that
+        # drained here would be free to reconfigure the engine.
+        collector.wait_for_pending_generations()
+
+        collector.resume()
+        assert started.wait(timeout=5.0), "generation did not resume"
+        offer.join(timeout=5.0)
+        collector.running = False
+
+    def test_drain_waits_for_workers_started_before_the_pause(self):
+        """A worker already registered when the pause lands is drained, not skipped."""
+        collector = self.create_collector()
+        release = threading.Event()
+        worker = threading.Thread(target=release.wait, args=(10.0,), daemon=True)
+
+        collector._start_worker_when_unpaused(worker)
+
+        drained = threading.Event()
+        drain = threading.Thread(
+            target=lambda: (collector.pause_and_drain(), drained.set()), daemon=True
+        )
+        drain.start()
+
+        assert not drained.wait(timeout=0.5), "drain returned with a worker in flight"
+        release.set()
+        assert drained.wait(timeout=10.0), "drain did not return after the worker ended"
+        drain.join(timeout=5.0)
+        collector.running = False
+
+    def test_pause_during_refit_wait_still_blocks_the_next_batch(self):
+        """The regression: a pause landing while the loop is parked on the refit wait.
+
+        This is the production sequence at a validation step -- refit, then
+        pause_and_drain -- and the collection loop is parked in the refit wait
+        the whole time. The pause check at the top of the loop has already been
+        passed, so without the re-check and the per-worker gate the loop wakes
+        up and launches an entire batch into the validation window while the
+        drain reports an empty in-flight set.
+        """
+        collector = self.create_collector()
+        collector.dataloader = ["batch-0"]
+        processed = threading.Event()
+        collector._process_batch = lambda batch: processed.set()
+        collector._should_pause_for_generation_limits = lambda: False
+
+        # Park the loop in the refit wait, as prepare_for_refit does.
+        collector._refit_pause_cleared.clear()
+        loop = threading.Thread(target=collector._collection_loop, daemon=True)
+        loop.start()
+        assert not processed.wait(timeout=0.5), "loop did not park on the refit wait"
+        assert loop.is_alive(), "collection loop exited instead of parking"
+
+        # Validation step: pause, let the refit finish, drain.
+        collector.pause()
+        collector._refit_pause_cleared.set()
+        collector.wait_for_pending_generations()
+
+        assert not processed.wait(timeout=1.0), (
+            "a batch was launched after the collector was paused and drained"
+        )
+
+        collector.resume()
+        assert processed.wait(timeout=5.0), "collection did not resume"
+        collector.running = False
+        loop.join(timeout=5.0)
