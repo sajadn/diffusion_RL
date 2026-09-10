@@ -26,7 +26,13 @@ class AbstractPolicyWorker:
     """Base class for policy workers with shared functionality."""
 
     def init_collective(
-        self, ip: str, port: int, world_size: int, *, train_world_size: int
+        self,
+        ip: str,
+        port: int,
+        world_size: int,
+        *,
+        train_world_size: int,
+        generation_group: Optional[str] = None,
     ) -> None:
         """Initialize the collective communication.
 
@@ -35,14 +41,34 @@ class AbstractPolicyWorker:
             port: Port for the process group
             world_size: Total world size (train_world_size + inference_world_size)
             train_world_size: Number of training workers (used in inference cluster)
+            generation_group: Name of the generation engine group this collective
+                refits, mirroring how `stream_weights_via_ipc_zmq` namespaces the
+                colocated path. A dedicated validation group runs its own
+                inference processes and only one group is awake at a time, so the
+                groups cannot share a process group: each gets its own, on its
+                own port.
         """
         from nemo_rl.distributed.stateless_process_group import StatelessProcessGroup
 
-        self.model_update_group = StatelessProcessGroup(
+        if not hasattr(self, "model_update_groups"):
+            self.model_update_groups: dict[Optional[str], Any] = {}  # pyrefly: ignore[implicitly-defined-attribute]
+        group = StatelessProcessGroup(
             master_address=ip, port=port, rank=self.rank, world_size=world_size
         )
         device = torch.cuda.current_device()
-        self.model_update_group.init_nccl_communicator(device=device)
+        group.init_nccl_communicator(device=device)
+        self.model_update_groups[generation_group] = group
+
+    def _model_update_group(self, generation_group: Optional[str] = None) -> Any:
+        """The refit collective for `generation_group`, or a clear error."""
+        groups = getattr(self, "model_update_groups", {})
+        if generation_group not in groups:
+            raise RuntimeError(
+                f"No refit collective for generation group {generation_group!r}. "
+                "init_collective must be called once per engine group before it "
+                f"can be refit (known groups: {sorted(map(str, groups))})."
+            )
+        return groups[generation_group]
 
     def is_alive(self) -> bool:
         """Check if the worker is alive."""

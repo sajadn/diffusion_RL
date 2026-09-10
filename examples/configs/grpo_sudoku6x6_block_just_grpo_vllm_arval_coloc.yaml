@@ -1,0 +1,41 @@
+# AR + diffusion validation in one cycle, COLOCATED variant of
+# grpo_sudoku6x6_block_just_grpo_vllm_fast_async_grpo_arval.yaml.
+#
+# Same two decodes -- rollout-matching diffusion as the primary, AR as a
+# reference on its own engine group -- but colocated and synchronous, so the
+# engine groups share GPUs with the training policy rather than living on
+# dedicated generation nodes. This is the path where `finish_generation`
+# already slept a group; the AR group additionally exercises `sleep()`/
+# `wake_up()` and the per-group refit, which are new.
+#
+# 1 node is enough for a smoke: colocated generation runs on the training GPUs.
+defaults: "grpo_sudoku6x6_block_just_grpo_vllm.yaml"
+
+policy:
+  generation:
+    vllm_val_dllm_overrides: null
+    vllm_val_dllm_variants:
+      diffusion:
+        vllm_kwargs:
+          diffusion_config:
+            selection_policy: "confidence_threshold"
+            confidence_threshold: 0.9
+            temperature: 1.0
+      ar:
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          diffusion_config: null
+          hf_overrides:
+            architectures: ["NemotronLabsDiffusionForCausalLM"]
+
+cluster:
+  num_nodes: 1
+
+checkpointing:
+  checkpoint_dir: "results/grpo-nd3b-bjg-sudoku6x6-vllm-arval-coloc"
+
+logger:
+  log_dir: "logs/grpo-nd3b-bjg-sudoku6x6-vllm-arval-coloc"
+  wandb:
+    name: "grpo-nd3b-bjg-sudoku6x6-vllm-arval-coloc"

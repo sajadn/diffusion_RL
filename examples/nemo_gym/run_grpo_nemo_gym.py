@@ -28,6 +28,7 @@ from wandb import Table
 
 from nemo_rl.algorithms.grpo import (
     ColocatablePolicyInterface,
+    ValEngineGroup,
     EnvironmentInterface,
     GenerationInterface,
     Logger,
@@ -195,7 +196,7 @@ The validation set you pass in will directly be used for validation with no addi
     (
         policy,
         policy_generation,
-        val_policy_generation,
+        val_policy_generations,
         cluster,
         dataloader,
         val_dataloader,
@@ -227,17 +228,20 @@ The validation set you pass in will directly be used for validation with no addi
     # is built. A dedicated validation engine group therefore needs its own Gym
     # env pointed at that group's servers; sharing the rollout env would leave
     # validation silently decoding on the rollout engines.
-    if val_policy_generation is not None:
+    val_groups: dict[str, ValEngineGroup] = {}
+    for val_group_name, val_generation in val_policy_generations.items():
         val_nemo_gym_config = NemoGymConfig(
-            model_name=val_policy_generation.cfg["model_name"],
-            base_urls=val_policy_generation.dp_openai_server_base_urls,
+            model_name=val_generation.cfg["model_name"],
+            base_urls=val_generation.dp_openai_server_base_urls,
             initial_global_config_dict=copy.deepcopy(config["env"]["nemo_gym"]),
         )
         val_nemo_gym = create_env(env_name="nemo_gym", env_config=val_nemo_gym_config)
         ray.get(val_nemo_gym.health_check.remote())
-        val_task_to_env = {"nemo_gym": val_nemo_gym}
-    else:
-        val_task_to_env = task_to_env
+        val_groups[val_group_name] = ValEngineGroup(
+            generation=val_generation, task_to_env={"nemo_gym": val_nemo_gym}
+        )
+    # Decodes that stay on the rollout engines keep the rollout env.
+    val_task_to_env = task_to_env
 
     if is_trajectory_collection:
         collect_trajectories(
@@ -299,6 +303,7 @@ The validation set you pass in will directly be used for validation with no addi
             grpo_save_state=grpo_state,
             master_config=master_config,
             max_trajectory_age_steps=async_config["max_trajectory_age_steps"],
+            val_groups=val_groups,
         )
     else:
         print("🚀 Running synchronous GRPO training")
@@ -317,7 +322,7 @@ The validation set you pass in will directly be used for validation with no addi
             checkpointer,
             grpo_state,
             master_config,
-            val_policy_generation=val_policy_generation,
+            val_groups=val_groups,
         )
 
 

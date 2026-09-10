@@ -18,7 +18,12 @@ import pprint
 
 from omegaconf import OmegaConf
 
-from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
+from nemo_rl.algorithms.grpo import (
+    MasterConfig,
+    ValEngineGroup,
+    grpo_train,
+    setup,
+)
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
 from nemo_rl.distributed.virtual_cluster import init_ray
@@ -106,7 +111,7 @@ def main() -> None:
     (
         policy,
         policy_generation,
-        val_policy_generation,
+        val_policy_generations,
         cluster,
         dataloader,
         val_dataloader,
@@ -116,6 +121,12 @@ def main() -> None:
         grpo_state,
         master_config,
     ) = setup(config, tokenizer, dataset, val_dataset, processor=processor)
+
+    # Dedicated validation engine groups reuse the rollout validation envs.
+    val_groups = {
+        name: ValEngineGroup(generation=generation, task_to_env=None)
+        for name, generation in val_policy_generations.items()
+    }
 
     grpo_train(
         policy,
@@ -130,7 +141,7 @@ def main() -> None:
         checkpointer,
         grpo_state,
         master_config,
-        val_policy_generation=val_policy_generation,
+        val_groups=val_groups,
     )
 
 

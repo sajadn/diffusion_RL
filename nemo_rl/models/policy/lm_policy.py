@@ -349,15 +349,26 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         return results
 
     def init_collective(
-        self, ip: str, port: int, world_size: int, *, train_world_size: int
+        self,
+        ip: str,
+        port: int,
+        world_size: int,
+        *,
+        train_world_size: int,
+        generation_group: Optional[str] = None,
     ) -> list[ray.ObjectRef]:
-        """Initialize the collective communication."""
+        """Initialize the collective communication.
+
+        `generation_group` names the engine group this collective refits; each
+        group needs its own, since only one is awake at a time.
+        """
         futures = self.worker_group.run_all_workers_single_data(
             "init_collective",
             ip=ip,
             port=port,
             world_size=world_size,
             train_world_size=train_world_size,
+            generation_group=generation_group,
         )
         # this function should co-work with vllm, so we should wait for all futures to complete outside
         return futures
@@ -931,12 +942,19 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
         return futures
 
     def broadcast_weights_for_collective(
-        self, kv_scales: Optional[dict[str, float]] = None
+        self,
+        kv_scales: Optional[dict[str, float]] = None,
+        generation_group: Optional[str] = None,
     ) -> list[ray.ObjectRef]:
-        """Broadcast the weights for collective communication."""
+        """Broadcast the weights for collective communication.
+
+        `generation_group` selects which engine group's collective to broadcast
+        on, the same way `stream_weights_via_ipc_zmq` selects its sockets.
+        """
         futures = self.worker_group.run_all_workers_single_data(
             "broadcast_weights_for_collective",
             kv_scales=kv_scales,
+            generation_group=generation_group,
         )
         # this function should co-work with vllm, so we should wait for all futures to complete outside
         return futures

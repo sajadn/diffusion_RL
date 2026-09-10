@@ -956,7 +956,9 @@ class DTensorPolicyWorkerV2Impl(AbstractPolicyWorker, ColocatablePolicyInterface
 
     @torch.no_grad()
     def broadcast_weights_for_collective(
-        self, kv_scales: Optional[dict[str, float]] = None
+        self,
+        kv_scales: Optional[dict[str, float]] = None,
+        generation_group: Optional[str] = None,
     ) -> None:
         """Broadcast the weights for collective communication."""
         if kv_scales is not None:
@@ -977,7 +979,7 @@ class DTensorPolicyWorkerV2Impl(AbstractPolicyWorker, ColocatablePolicyInterface
 
         packed_broadcast_producer(
             iterator=dtensor_params_generator(self.model, self.dtype),
-            group=self.model_update_group,
+            group=self._model_update_group(generation_group),
             src=0,
             post_iter_func=dtensor_post_iter_func,
         )

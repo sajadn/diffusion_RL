@@ -101,8 +101,26 @@ class VllmConfig(GenerationConfig):
     #              max_denoising_steps: 16   # == canvas_length, since
     #                # tokens-per-forward is canvas_length/max_denoising_steps
     #
-    # Variants may not contain the engine-config key (they are applied via
-    # reconfigure_dllm, which cannot change engine-launch settings); use
-    # vllm_val_dllm_overrides for that. When absent, validation falls back
-    # to the single decode from vllm_val_dllm_overrides.
+    # A variant WITHOUT vllm_cfg is applied via reconfigure_dllm on the rollout
+    # engines. A variant WITH vllm_cfg gets a dedicated engine group of its own,
+    # built by deep-merging it onto this config -- that is how AR and diffusion
+    # are validated in the same cycle, since the mode is fixed when the engine
+    # loads and no runtime knob can change it:
+    #      vllm_val_dllm_variants:
+    #        diffusion:            # primary: matches the rollout decode
+    #          vllm_kwargs:
+    #            diffusion_config:
+    #              selection_policy: "confidence_threshold"
+    #              confidence_threshold: 0.9
+    #        ar:                   # reference: its own engine group
+    #          vllm_cfg:
+    #            gpu_memory_utilization: 0.3
+    #          vllm_kwargs:
+    #            diffusion_config: null
+    #            hf_overrides:
+    #              architectures: ["NemotronLabsDiffusionForCausalLM"]
+    # Groups time-share the device (only one is awake at a time), so their
+    # gpu_memory_utilization budgets may overlap, but each must state its own.
+    # When absent, validation falls back to the single decode from
+    # vllm_val_dllm_overrides.
     vllm_val_dllm_variants: NotRequired[dict[str, Any] | None]

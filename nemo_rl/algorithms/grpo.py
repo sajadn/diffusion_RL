@@ -18,7 +18,8 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from typing import Any, NotRequired, Optional, TypedDict, TypeVar, cast
+from collections.abc import Callable
+from typing import Any, NamedTuple, NotRequired, Optional, TypedDict, TypeVar, cast
 
 import numpy as np
 import ray
@@ -328,30 +329,61 @@ def _assert_val_group_shares_memory(
         )
 
 
-def _build_val_generation_config(
+def _val_engine_group_overrides(
     generation_config: "SGLangConfig | VllmConfig",
-) -> Optional["SGLangConfig | VllmConfig"]:
-    """Build the config for the validation-only generation engine group.
+) -> dict[str, dict[str, Any]]:
+    """Validation decodes that need an engine group of their own, keyed by name.
 
-    Starts from a deep copy of the rollout generation config and applies the
-    backend's `*_val_dllm_overrides` on top, so configs only need to state what
-    differs for validation (e.g. SGLang dllm_algorithm, or a vLLM
-    diffusion_config to validate with diffusion decoding under AR rollouts).
-    Returns None when no validation engine group is requested (absent overrides
-    or soft-knob-only overrides, which use the runtime reconfigure path).
+    A decode is engine-level when its overrides carry the backend's
+    engine-config key. AR vs diffusion is decided when the engine loads
+    (`hf_overrides.architectures` picks the causal-LM class and
+    `diffusion_config: null` drops the canvas), so it cannot be reached with
+    `reconfigure_dllm` -- validating under both in one cycle means two engine
+    groups. Soft-knob decodes are absent from this mapping and keep running on
+    the rollout engines.
+
+    `<backend>_val_dllm_variants` entries are keyed by their variant name; the
+    older single `<backend>_val_dllm_overrides` form maps from "".
     """
     backend = generation_config["backend"]
     spec = _val_group_spec(backend)
     if spec is None:
-        return None
+        return {}
+    variants = generation_config.get(spec["variants_key"])
+    if variants:
+        return {
+            name: knobs
+            for name, knobs in variants.items()
+            if _val_overrides_need_server_group(knobs, backend)
+        }
     overrides = generation_config.get(spec["overrides_key"])
-    if not _val_overrides_need_server_group(overrides, backend):
-        return None
+    if _val_overrides_need_server_group(overrides, backend):
+        assert overrides is not None  # narrowed by _val_overrides_need_server_group
+        return {"": overrides}
+    return {}
+
+
+def _build_val_generation_config(
+    generation_config: "SGLangConfig | VllmConfig",
+    overrides: dict[str, Any],
+) -> "SGLangConfig | VllmConfig":
+    """Build the config for one validation-only generation engine group.
+
+    Starts from a deep copy of the rollout generation config and applies
+    `overrides` on top, so configs only need to state what differs for
+    validation (e.g. SGLang dllm_algorithm, or a vLLM diffusion_config to
+    validate with diffusion decoding under AR rollouts). `_deep_update` replaces
+    non-dict values wholesale, which is what lets an AR validation group set
+    `vllm_kwargs.diffusion_config: null`.
+    """
+    backend = generation_config["backend"]
+    spec = _VAL_GROUP_BACKENDS[backend]
     val_config = copy.deepcopy(generation_config)
-    # The validation group's decode policy is pinned by its own launch config:
-    # it must not recurse into another validation group or trigger the
-    # validation-time reconfigure hook on itself.
+    # This group's decode is pinned by its own launch config: it must not
+    # recurse into another validation group or trigger the validation-time
+    # reconfigure hook on itself.
     val_config[spec["overrides_key"]] = None
+    val_config[spec["variants_key"]] = None
     _deep_update(val_config, copy.deepcopy(overrides))
 
     _assert_val_group_shares_memory(
@@ -360,40 +392,88 @@ def _build_val_generation_config(
     return val_config
 
 
-def _maybe_init_val_generation_group(
+def _init_val_generation_groups(
     generation_config: "SGLangConfig | VllmConfig",
     inference_cluster: RayVirtualCluster,
     worker_init_timing_metrics: dict[str, Any],
-) -> Optional[GenerationInterface]:
-    """Launch the validation-only generation engine group, if one is requested.
+) -> dict[str, GenerationInterface]:
+    """Launch one validation-only engine group per engine-level decode.
 
-    Started before the rollout group while GPU memory is still clean, then put
-    to sleep so the rollout engines and the policy can initialize as usual. It
-    is woken up (and refit with the current weights) only around validation.
+    Empty when validation reuses the rollout engines. Groups are started before
+    the rollout group while GPU memory is still clean, then put to sleep so the
+    rollout engines and the policy can initialize as usual; each is woken (and
+    refit with the current weights) only for its own validation pass. They
+    time-share the device -- at most one is ever awake -- so their memory
+    budgets are allowed to overlap.
     """
-    val_generation_config = _build_val_generation_config(generation_config)
-    if val_generation_config is None:
-        return None
+    group_overrides = _val_engine_group_overrides(generation_config)
+    if not group_overrides:
+        return {}
 
     backend = generation_config["backend"]
     spec = _VAL_GROUP_BACKENDS[backend]
     generation_cls = SGLangGeneration if backend == "sglang" else VllmGeneration
-    print(
-        f"  ▶ Initializing validation {backend} engine group "
-        f"(overrides: {generation_config[spec['overrides_key']]})...",
-        flush=True,
-    )
+    val_generations: dict[str, GenerationInterface] = {}
     t0 = time.perf_counter()
-    val_policy_generation = generation_cls(
-        cluster=inference_cluster,
-        config=val_generation_config,
-        # Ray named actors must be unique; the rollout group owns the backend's
-        # default name prefix.
-        name_prefix=spec["name_prefix"],
-    )
-    val_policy_generation.finish_generation()
+    for name, overrides in group_overrides.items():
+        print(
+            f"  ▶ Initializing validation {backend} engine group "
+            f"{name or '(single)'} (overrides: {overrides})...",
+            flush=True,
+        )
+        val_generations[name] = generation_cls(
+            cluster=inference_cluster,
+            config=_build_val_generation_config(generation_config, overrides),
+            # Ray named actors must be unique; the rollout group owns the
+            # backend's default name prefix, and each validation group needs a
+            # prefix of its own -- it also namespaces that group's refit
+            # transport (ZMQ sockets and NCCL collective).
+            name_prefix=f"{spec['name_prefix']}_{name}" if name else spec["name_prefix"],
+        )
+        # Yield the memory rather than just resetting the prefix cache:
+        # `finish_generation` skips the sleep for a non-colocated group, and
+        # the rollout engines still have to be built on these same GPUs.
+        val_generations[name].sleep()
     worker_init_timing_metrics[f"{backend}_val_init_time_s"] = time.perf_counter() - t0
-    return val_policy_generation
+    return val_generations
+
+
+
+class ValEngineGroup(NamedTuple):
+    """A validation-only engine group and the env wiring routed with it.
+
+    `task_to_env` matters on the NeMo-Gym path, where generation goes to Gym
+    servers whose base URLs are fixed when the env is built: a group needs its
+    own env pointed at its own servers, or validation silently decodes on the
+    rollout engines.
+    """
+
+    generation: GenerationInterface
+    task_to_env: Optional[dict[str, EnvironmentInterface]]
+
+
+def _val_uses_rollout_generation(
+    generation_config: "SGLangConfig | VllmConfig",
+) -> bool:
+    """True when at least one validation decode runs on the rollout engines.
+
+    Engine-level decodes have groups of their own, so a run whose validation is
+    entirely engine-level leaves the rollout engines asleep through validation
+    (they are refit lazily at the next rollout). A soft-knob decode, on the other
+    hand, is a `reconfigure_dllm` on the rollout engines and needs them awake.
+    """
+    backend = generation_config["backend"]
+    spec = _val_group_spec(backend)
+    if spec is None:
+        return True
+    variants = generation_config.get(spec["variants_key"])
+    if variants:
+        return any(
+            not _val_overrides_need_server_group(knobs, backend)
+            for knobs in variants.values()
+        )
+    overrides = generation_config.get(spec["overrides_key"])
+    return not _val_overrides_need_server_group(overrides, backend)
 
 
 def setup(
@@ -598,25 +678,21 @@ def setup(
     # Validated up front so misconfigurations fail before any cluster/worker
     # setup. Soft-knob-only overrides keep the legacy runtime reconfigure path.
     val_group_spec = _val_group_spec(generation_config["backend"])
-    val_needs_server_group = val_group_spec is not None and (
-        _val_overrides_need_server_group(
-            generation_config.get(val_group_spec["overrides_key"]),
-            generation_config["backend"],
-        )
-    )
+    num_val_engine_groups = len(_val_engine_group_overrides(generation_config))
+    val_needs_server_group = bool(num_val_engine_groups)
     if val_needs_server_group:
         assert val_group_spec is not None  # narrowed by val_needs_server_group
         val_group_desc = (
             f"{val_group_spec['overrides_key']} with "
             f"{val_group_spec['engine_cfg_key']} (dedicated validation engine group)"
         )
-        assert colocated_inference, (
-            f"{val_group_desc} requires colocated inference: the validation "
-            "engines share GPUs with training and time-share GPU memory (each "
-            "group sleeps while the other generates)."
-        )
-        assert not grpo_config.get("async_grpo", {}).get("enabled", False), (
-            f"{val_group_desc} is not supported with async GRPO."
+        # Non-colocated refit goes over NCCL, and each engine group gets its own
+        # collective (see init_collective's generation_group). SGLang has no
+        # non-colocated refit path at all, so it still needs colocation.
+        assert generation_config["backend"] != "sglang" or colocated_inference, (
+            f"{val_group_desc} with the SGLang backend requires colocated "
+            "inference: SGLang has no non-colocated weight-refit path "
+            "(refit_policy_generation raises NotImplementedError)."
         )
 
     env_name_list = extract_necessary_env_names(data_config)
@@ -753,7 +829,12 @@ def setup(
             bundle_ct_per_node_list=[inference_gpus_per_node] * inference_nodes,
             use_gpus=True,
             num_gpus_per_node=inference_gpus_per_node,
-            max_colocated_worker_groups=1,
+            # Rollout engines + every dedicated validation engine group share
+            # these GPUs, so the bundles must be sized for all of them. Sized at
+            # 1 they hold only the rollout group and a validation group's actors
+            # stay PENDING forever ("8+ pending tasks/actors" in `ray status`),
+            # which surfaces as a silent hang in VllmGeneration._post_init.
+            max_colocated_worker_groups=1 + num_val_engine_groups,
         )
         print(
             f"  ✓ Ray inference cluster initialized with {inference_nodes} nodes with {inference_gpus_per_node} GPUs per node",
@@ -879,8 +960,9 @@ def setup(
         return policy_generation, policy
 
     # Handle generation-specific setup
-    # Set only when the backend's val overrides carry its engine-config key.
-    val_policy_generation = None
+    # One entry per validation decode whose overrides carry the backend's
+    # engine-config key; empty when validation reuses the rollout engines.
+    val_policy_generations: dict[str, GenerationInterface] = {}
     if backend == "megatron":
         # Megatron generation: policy_generation is None, only initialize policy
         policy_generation = None
@@ -959,7 +1041,7 @@ def setup(
         # the validation group inherits it -- and can still override it, since
         # the validation overrides deep-merge last (a diffusion validation
         # engine may want a different block_size than the training policy).
-        val_policy_generation = _maybe_init_val_generation_group(
+        val_policy_generations = _init_val_generation_groups(
             generation_config, inference_cluster, worker_init_timing_metrics
         )
 
@@ -987,7 +1069,7 @@ def setup(
         # memory is still clean, then put it to sleep (memory saver) so the
         # rollout servers and the policy can initialize as usual. It is woken
         # up (and refit with current weights) only around validation.
-        val_policy_generation = _maybe_init_val_generation_group(
+        val_policy_generations = _init_val_generation_groups(
             generation_config, inference_cluster, worker_init_timing_metrics
         )
 
@@ -1010,32 +1092,51 @@ def setup(
     # print the node IP and GPU ID of the policy workers for debugging
     policy.print_node_ip_and_gpu_id()
 
+    _val_generations_for_refit = list(val_policy_generations.values())
+
     # if it is not colocated inference, initialize collective communication for update weights
     if not colocated_inference:
         t0 = time.perf_counter()
-        ip, port = train_cluster.get_master_address_and_port()
-        print(f"Using ip: {ip}, port: {port} for collective communication", flush=True)
         # world includes all training workers and all inference workers
         train_world_size = train_cluster.world_size()
+        # Every group on the inference cluster contributes one rank per GPU
+        # whatever its parallelism, so the world size is the same for each.
         inference_world_size = inference_nodes * inference_gpus_per_node
         world_size = train_world_size + inference_world_size
-        # init collective
-        futures_train = policy.init_collective(
-            ip, port, world_size, train_world_size=train_world_size
-        )
-        futures_inference = policy_generation.init_collective(
-            ip, port, world_size, train_world_size=train_world_size
-        )  # type: ignore
-        # wait for all futures to complete
-        ray.get(futures_train + futures_inference)
+        # One collective per engine group, each on its own port, mirroring how
+        # the colocated path namespaces its refit sockets per group. A dedicated
+        # validation group runs its own inference processes and only one group is
+        # ever awake, so they cannot share a process group. Groups are brought up
+        # one at a time on purpose: the port finder can hand out the same free
+        # port twice if nothing has bound it yet.
+        for _gen_group in [policy_generation, *_val_generations_for_refit]:
+            ip, port = train_cluster.get_master_address_and_port()
+            _group_name = getattr(_gen_group, "name_prefix", None)
+            print(
+                f"Using ip: {ip}, port: {port} for collective communication "
+                f"with generation group {_group_name!r}",
+                flush=True,
+            )
+            futures_train = policy.init_collective(
+                ip,
+                port,
+                world_size,
+                train_world_size=train_world_size,
+                generation_group=_group_name,
+            )
+            futures_inference = _gen_group.init_collective(
+                ip, port, world_size, train_world_size=train_world_size
+            )  # type: ignore
+            # wait for all futures to complete
+            ray.get(futures_train + futures_inference)
         worker_init_timing_metrics["collective_init_time_s"] = time.perf_counter() - t0
 
     # prepare refit info
     state_dict_info = policy.prepare_refit_info()
     if policy_generation is not None:
         policy_generation.prepare_refit_info(state_dict_info)
-    if val_policy_generation is not None:
-        val_policy_generation.prepare_refit_info(state_dict_info)
+    for _val_generation in val_policy_generations.values():
+        _val_generation.prepare_refit_info(state_dict_info)
 
     # Calculate total setup time
     total_setup_time = time.perf_counter() - setup_start_time
@@ -1073,7 +1174,7 @@ def setup(
     return (
         policy,
         policy_generation,
-        val_policy_generation,
+        val_policy_generations,
         (train_cluster, inference_cluster),
         dataloader,
         val_dataloader,
@@ -1463,7 +1564,13 @@ def refit_policy_generation(
                 raise NotImplementedError(
                     "SGLang haven't implemented non-colocated inference mode. "
                 )
-            futures_train = policy.broadcast_weights_for_collective(kv_scales=kv_scales)
+            # Namespaced per engine group, exactly like the ipc-zmq branch
+            # above: init_collective registered one process group per engine
+            # group under that group's name_prefix.
+            futures_train = policy.broadcast_weights_for_collective(
+                kv_scales=kv_scales,
+                generation_group=getattr(policy_generation, "name_prefix", None),
+            )
             futures_inference = policy_generation.update_weights_from_collective()
             # wait for all futures to complete
             ray.get(futures_train)
@@ -1700,14 +1807,15 @@ def grpo_train(
     checkpointer: CheckpointManager,
     grpo_save_state: GRPOSaveState,
     master_config: MasterConfig,
-    val_policy_generation: Optional[GenerationInterface] = None,
+    val_groups: Optional[dict[str, ValEngineGroup]] = None,
 ) -> None:
     """Run GRPO training algorithm.
 
-    When `val_policy_generation` is provided (a dedicated SGLang server group
-    built from sglang_val_dllm_overrides containing sglang_cfg), validation decodes on
-    it instead of the rollout servers: it is refit with the current policy
-    weights right before each validation and put back to sleep right after.
+    `val_groups` holds the dedicated validation engine groups, keyed by the
+    decode variant each one serves. A variant named there decodes on its own
+    engine -- refit with the current policy weights right before its pass and put
+    back to sleep right after -- which is how AR and diffusion validation run in
+    the same cycle. Variants absent from it decode on the rollout engines.
     """
     timer = Timer()
     timeout = TimeoutChecker(
@@ -1764,42 +1872,69 @@ def grpo_train(
     # Initialize advantage estimator
     adv_estimator = _create_advantage_estimator(master_config)
 
+    def _prepare_val_generation(generation: GenerationInterface) -> None:
+        """Wake one dedicated validation group and refit it with current weights.
+
+        Handed to `validate`, which calls it immediately before that group's pass
+        and sleeps the group again afterwards -- the groups share the device with
+        the rollout engines, so only one is ever awake. Reads `kv_scales_cache`
+        at call time so a group refit picks up the scales from the most recent
+        training step.
+        """
+        # Weight streaming reads GPU-RESIDENT policy weights. Any preceding
+        # refit in this validation -- the rollout group's, or another validation
+        # group's -- ended with offload_after_refit, which leaves them on CPU, so
+        # restore the invariant before streaming again. Without this the stream
+        # dies in pack_tensor with a bare "CUDA error: invalid argument".
+        if colocated_inference:
+            policy.prepare_for_lp_inference()
+        generation.wake_up()
+        refit_policy_generation(
+            policy,
+            generation,
+            colocated_inference,
+            kv_scales=kv_scales_cache if sync_kv_scales else None,
+        )
+
+    # True when at least one validation decode runs on the rollout engines; a
+    # fully engine-level validation leaves them asleep throughout.
+    val_uses_rollout_engines = _val_uses_rollout_generation(
+        master_config["policy"]["generation"]
+    )
+
     # Run validation at the start if configured
     # TODO: Add validation with kv scales if needed
     if val_at_start and current_step == 0:
         print("\n🔍 Running initial validation...", flush=True)
         memory_tracker.snapshot_start_of_stage("Initial validation", dir())
 
-        if val_policy_generation is not None:
-            # Dedicated validation servers: refit them with the current weights
-            # and leave the rollout servers untouched (they get refit lazily at
-            # the next rollout since POLICY_GENERATION_STALE stays True).
-            refit_policy_generation(policy, val_policy_generation, colocated_inference)
-            val_generation = val_policy_generation
-        elif NEED_REFIT and (
-                        POLICY_GENERATION_STALE
-                        or generation_needs_weight_refit(policy_generation)
-                    ):
-            refit_policy_generation(policy, policy_generation, colocated_inference)
-            POLICY_GENERATION_STALE = False
-            val_generation = policy_generation
-        else:
-            policy_generation.prepare_for_generation()
-            val_generation = policy_generation
+        # Dedicated validation groups are woken and refit inside `validate`,
+        # one at a time; the rollout engines are only prepared here if some
+        # variant actually decodes on them (otherwise they stay asleep and get
+        # refit lazily at the next rollout, POLICY_GENERATION_STALE stays True).
+        if val_uses_rollout_engines:
+            if NEED_REFIT and (
+                POLICY_GENERATION_STALE
+                or generation_needs_weight_refit(policy_generation)
+            ):
+                refit_policy_generation(policy, policy_generation, colocated_inference)
+                POLICY_GENERATION_STALE = False
+            else:
+                policy_generation.prepare_for_generation()
         val_metrics, validation_timings = validate(
-            val_generation,
+            policy_generation,
             val_dataloader,
             tokenizer,
             val_task_to_env,
             step=0,
             master_config=master_config,
             logger=logger,
-            generation_config=val_policy_generation.cfg
-            if val_policy_generation is not None
-            else None,
+            val_groups=val_groups,
+            prepare_val_generation=_prepare_val_generation,
         )
-        val_generation.finish_generation()
-        if val_policy_generation is not None:
+        if val_uses_rollout_engines:
+            policy_generation.finish_generation()
+        if val_groups:
             # Weight streaming assumes GPU-resident policy weights (normally
             # guaranteed by the training step preceding every refit), but the
             # val-group refit above ended with offload_after_refit and the
@@ -2392,48 +2527,36 @@ def grpo_train(
                     val_at_end and is_last_step
                 ):
                     memory_tracker.snapshot_start_of_stage("Validation", dir())
-                    if val_policy_generation is not None:
-                        # Dedicated validation servers: refit them with the
-                        # current weights and leave the rollout servers asleep
-                        # (they get refit at the next rollout as usual).
-                        refit_policy_generation(
-                            policy,
-                            val_policy_generation,
-                            colocated_inference,
-                            kv_scales=kv_scales_cache if sync_kv_scales else None,
-                        )
-                        val_generation = val_policy_generation
-                    elif NEED_REFIT and (
-                        POLICY_GENERATION_STALE
-                        or generation_needs_weight_refit(policy_generation)
-                    ):
-                        refit_policy_generation(
-                            policy,
-                            policy_generation,
-                            colocated_inference,
-                            kv_scales=kv_scales_cache if sync_kv_scales else None,
-                        )
-                        POLICY_GENERATION_STALE = False
-                        val_generation = policy_generation
-                    else:
-                        if colocated_inference:
-                            policy.offload_after_refit()  # unload optimizer to make space for generation
-                        policy_generation.prepare_for_generation()
-                        val_generation = policy_generation
+                    if val_uses_rollout_engines:
+                        if NEED_REFIT and (
+                            POLICY_GENERATION_STALE
+                            or generation_needs_weight_refit(policy_generation)
+                        ):
+                            refit_policy_generation(
+                                policy,
+                                policy_generation,
+                                colocated_inference,
+                                kv_scales=kv_scales_cache if sync_kv_scales else None,
+                            )
+                            POLICY_GENERATION_STALE = False
+                        else:
+                            if colocated_inference:
+                                policy.offload_after_refit()  # unload optimizer to make space for generation
+                            policy_generation.prepare_for_generation()
                     val_metrics, validation_timings = validate(
-                        val_generation,
+                        policy_generation,
                         val_dataloader,
                         tokenizer,
                         val_task_to_env,
                         step=total_steps + 1,
                         master_config=master_config,
                         logger=logger,
-                        generation_config=val_policy_generation.cfg
-                        if val_policy_generation is not None
-                        else None,
+                        val_groups=val_groups,
+                        prepare_val_generation=_prepare_val_generation,
                     )
-                    val_generation.finish_generation()
-                    if val_policy_generation is not None:
+                    if val_uses_rollout_engines:
+                        policy_generation.finish_generation()
+                    if val_groups:
                         # Restore the GPU-resident-weights invariant for the
                         # next rollout refit (see the val_at_start site).
                         policy.prepare_for_lp_inference()
@@ -2805,6 +2928,8 @@ def validate(
     master_config: MasterConfig,
     logger: Optional[Logger] = None,
     generation_config: Optional[dict[str, Any]] = None,
+    val_groups: Optional[dict[str, ValEngineGroup]] = None,
+    prepare_val_generation: Optional[Callable[[GenerationInterface], None]] = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run validation on the validation dataset.
 
@@ -2813,6 +2938,17 @@ def validate(
             validation. Defaults to master_config["policy"]["generation"]; pass
             the dedicated validation group's config when validating on a second
             server group so decode overrides are read from the right config.
+        val_groups: Dedicated validation engine groups, keyed by the decode
+            variant they serve (see `<backend>_val_dllm_variants`). A variant
+            named here decodes on its own engine -- that is how AR and diffusion
+            are validated in one cycle, since the mode is fixed when the engine
+            loads. Variants absent from this mapping run on `policy_generation`
+            under a runtime `reconfigure_dllm`.
+        prepare_val_generation: Called with a dedicated group right before its
+            pass and must leave it awake and refit with the current weights;
+            this function sleeps it again afterwards. Required whenever
+            `val_groups` is non-empty -- the groups share the device with the
+            rollout engines, so at most one may be awake at a time.
     """
     if val_dataloader is None:
         assert val_dataloader is not None or master_config["dpo"]["val_period"] == 0, (
@@ -2882,28 +3018,23 @@ def validate(
         )
         if variants_cfg:
             for variant_name, variant_knobs in variants_cfg.items():
-                assert not _val_overrides_need_server_group(
-                    variant_knobs, val_backend
-                ), (
-                    f"validation variant '{variant_name}' contains the engine-config "
-                    f"key for backend '{val_backend}'; variants are runtime decode "
-                    f"knobs applied via reconfigure_dllm and cannot change "
-                    f"engine-launch settings (use the dedicated validation engine "
-                    f"group, i.e. {val_spec['overrides_key']}, for those)."
-                )
+                # A variant carrying the engine-config key gets its own engine
+                # group (built in setup, routed via `val_groups`); the rest are
+                # runtime decode knobs applied with reconfigure_dllm.
                 val_variants.append((variant_name, variant_knobs))
         else:
             val_variants.append(("", val_dllm_overrides))
 
-        def _run_val_pass():
-            """Run one validation sweep under the CURRENTLY configured decode.
+        def _run_val_pass(generation, variant_gen_cfg, variant_task_to_env):
+            """Run one validation sweep on `generation` under its current decode.
 
             Factored out so each decode variant (see
             `<backend>_val_dllm_variants`) can run the same sweep without
-            duplicating the rollout dispatch. All accumulators are local; the
-            caller decides what to keep. The dataloader is re-iterated from the
-            start, so every variant sees the same prompts and their metrics are
-            paired rather than independently sampled.
+            duplicating the rollout dispatch, whether it decodes on the rollout
+            engines or on a dedicated group of its own. All accumulators are
+            local; the caller decides what to keep. The dataloader is re-iterated
+            from the start, so every variant sees the same prompts and their
+            metrics are paired rather than independently sampled.
             """
             pass_rewards: list = []
             pass_lengths: list = []
@@ -2925,12 +3056,12 @@ def validate(
                     # other than 0 or 1, so an AR rollout temperature leaking
                     # in here would fail every validation request.
                     nemo_gym_rollout_result = run_async_nemo_gym_rollout(
-                        policy_generation=policy_generation,
+                        policy_generation=generation,
                         input_batch=val_batch,
                         tokenizer=tokenizer,
-                        task_to_env=val_task_to_env,
+                        task_to_env=variant_task_to_env,
                         max_seq_len=None,
-                        generation_config=gen_cfg,
+                        generation_config=variant_gen_cfg,
                         max_rollout_turns=None,
                         greedy=False,
                     )
@@ -2939,20 +3070,20 @@ def validate(
                     pass_extra = gen_metrics
                 elif _should_use_async_rollouts(master_config):
                     val_batch, gen_metrics = run_async_multi_turn_rollout(
-                        policy_generation,
+                        generation,
                         val_batch,
                         tokenizer,
-                        val_task_to_env,
+                        variant_task_to_env,
                         max_seq_len=master_config["policy"]["max_total_sequence_length"],
                         max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
                         greedy=False,
                     )
                 else:
                     val_batch, gen_metrics = run_multi_turn_rollout(
-                        policy_generation,
+                        generation,
                         val_batch,
                         tokenizer,
-                        val_task_to_env,
+                        variant_task_to_env,
                         max_seq_len=master_config["policy"]["max_total_sequence_length"],
                         max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
                         greedy=False,
@@ -2974,18 +3105,66 @@ def validate(
 
         variant_metrics: dict[str, float] = {}
         additional_metrics_to_report: dict = {}
+        # The engine groups deliberately over-subscribe GPU memory -- each is
+        # sized as if it owned the device -- so exactly one may hold it at a
+        # time. The caller leaves the rollout engines awake iff some variant
+        # decodes on them; from here on the loop hands the device back and forth.
+        rollout_holds_device_expected = _val_uses_rollout_generation(gen_cfg)
+        rollout_holds_device = rollout_holds_device_expected
         for variant_idx, (variant_name, variant_knobs) in enumerate(val_variants):
             is_primary = variant_idx == 0
             restore_dllm_overrides = None
             pending_exc = None
+            # An engine-level variant decodes on its own group, launched with
+            # these knobs already baked in; every other variant runs on the
+            # rollout engines under a runtime reconfigure.
+            variant_group = (val_groups or {}).get(variant_name)
+            if variant_group is not None:
+                variant_generation = variant_group.generation
+                variant_gen_cfg = variant_group.generation.cfg
+                variant_task_to_env = (
+                    variant_group.task_to_env
+                    if variant_group.task_to_env is not None
+                    else val_task_to_env
+                )
+            else:
+                variant_generation = policy_generation
+                variant_gen_cfg = gen_cfg
+                variant_task_to_env = val_task_to_env
             try:
+                if variant_group is not None:
+                    # Hand the device over: the rollout engines must release
+                    # their reservation before this group can claim its own.
+                    if rollout_holds_device:
+                        policy_generation.sleep()
+                        rollout_holds_device = False
+                    assert prepare_val_generation is not None, (
+                        f"validation variant '{variant_name}' has a dedicated "
+                        "engine group but no prepare_val_generation hook, so its "
+                        "weights would be whatever the group was launched with."
+                    )
+                    # The groups share the device with the rollout engines, so
+                    # this wakes and refits exactly one of them; the finally
+                    # below puts it back to sleep.
+                    prepare_val_generation(variant_generation)
+                    print(
+                        f"  ↪ validation decode "
+                        f"'{variant_name or 'primary'}' on dedicated engine group "
+                        f"{getattr(variant_generation, 'name_prefix', '?')}",
+                        flush=True,
+                    )
                 # Knobs carrying the backend's engine-config key describe a
                 # dedicated validation engine group (already launched with them
                 # baked in), not runtime decode knobs -- never feed those to
                 # reconfigure_dllm.
-                if variant_knobs and not _val_overrides_need_server_group(
+                elif variant_knobs and not _val_overrides_need_server_group(
                     variant_knobs, val_backend
                 ):
+                    # Take the device back from whichever group had it. Waking
+                    # restores the weights offloaded by `sleep`, so no refit.
+                    if not rollout_holds_device:
+                        policy_generation.wake_up()
+                        rollout_holds_device = True
                     restore_dllm_overrides = policy_generation.reconfigure_dllm(
                         variant_knobs
                     )
@@ -3004,12 +3183,17 @@ def validate(
                         f"(will restore: {restore_dllm_overrides})",
                         flush=True,
                     )
+                if variant_group is None and not rollout_holds_device:
+                    policy_generation.wake_up()
+                    rollout_holds_device = True
                 (
                     v_rewards,
                     v_lengths,
                     v_msg_logs,
                     v_extra,
-                ) = _run_val_pass()
+                ) = _run_val_pass(
+                    variant_generation, variant_gen_cfg, variant_task_to_env
+                )
             except Exception as e:
                 # Remember an in-flight error so the restore below can avoid
                 # masking it (see finally).
@@ -3025,6 +3209,10 @@ def validate(
                 )
                 continue
             finally:
+                # A dedicated group goes back to sleep so the next variant (or
+                # the rollout engines) can have the memory.
+                if variant_group is not None:
+                    variant_generation.sleep()
                 # Always restore the rollout decoding config. Leaving the engine
                 # on a validation policy would corrupt every subsequent rollout,
                 # so a failed restore is fatal -- except when it would mask an
@@ -3055,6 +3243,12 @@ def validate(
                     variant_metrics[f"avg_length/{variant_name}"] = sum(
                         v_lengths
                     ) / len(v_lengths)
+
+        # Give the device back the way the caller left it. It woke the rollout
+        # engines iff some variant decodes on them, and async collection resumes
+        # the moment this returns -- generating on a sleeping engine would fail.
+        if rollout_holds_device_expected and not rollout_holds_device:
+            policy_generation.wake_up()
 
         # Calculate validation metrics
         num_samples = len(total_rewards)
@@ -3137,6 +3331,7 @@ def async_grpo_train(
     grpo_save_state: GRPOSaveState,
     master_config: MasterConfig,
     max_trajectory_age_steps: int = 1,
+    val_groups: Optional[dict[str, ValEngineGroup]] = None,
 ) -> None:
     """Run asynchronous GRPO training with replay buffer.
 
@@ -3233,6 +3428,27 @@ def async_grpo_train(
             "collection will be drained (not just paused) around each validation.",
             flush=True,
         )
+
+    def _prepare_val_generation(generation: GenerationInterface) -> None:
+        """Wake one dedicated validation group and refit it with current weights.
+
+        Handed to `validate`, which calls it right before that group's pass and
+        sleeps the group again afterwards. The groups share the device with the
+        rollout engines, so collection is drained and the rollout engines are put
+        to sleep before any of this runs.
+        """
+        # Weight streaming reads GPU-RESIDENT policy weights. Any preceding
+        # refit in this validation -- the rollout group's, or another validation
+        # group's -- ended with offload_after_refit, which leaves them on CPU, so
+        # restore the invariant before streaming again. Without this the stream
+        # dies in pack_tensor with a bare "CUDA error: invalid argument".
+        if colocated_inference:
+            policy.prepare_for_lp_inference()
+        generation.wake_up()
+        refit_policy_generation(policy, generation, colocated_inference)
+
+    # True when at least one validation decode runs on the rollout engines.
+    val_uses_rollout_engines = _val_uses_rollout_generation(_async_gen_cfg)
 
     # Calculate minimum buffer size from training requirements
     # In per-prompt buffer mode, one buffer entry is 1 prompt * num_generations_per_prompt
@@ -3366,12 +3582,15 @@ def async_grpo_train(
     if val_at_start and step == 0:
         print("\n🔍 Running initial validation...")
         # Pause trajectory collection during initial validation
-        if val_reconfigures_engine:
+        if val_reconfigures_engine or val_groups:
             ray.get(trajectory_collector.pause_and_drain.remote())
         else:
             trajectory_collector.pause.remote()
 
         try:
+            if val_groups and not val_uses_rollout_engines:
+                # Hand the device to the validation groups.
+                policy_generation.finish_generation()
             val_metrics, validation_timings = validate(
                 policy_generation,
                 val_dataloader,
@@ -3380,8 +3599,11 @@ def async_grpo_train(
                 step=0,
                 master_config=master_config,
                 logger=logger,
+                val_groups=val_groups,
+                prepare_val_generation=_prepare_val_generation,
             )
-            policy_generation.finish_generation()
+            if val_uses_rollout_engines:
+                policy_generation.finish_generation()
             logger.log_metrics(val_metrics, step, prefix="validation")
             logger.log_metrics(validation_timings, step, prefix="timing/validation")
             print("✅ Initial validation completed successfully")
@@ -3772,21 +3994,33 @@ def async_grpo_train(
                     val_at_end and is_last_step
                 ):
                     # Pause trajectory collection during validation to reduce memory pressure
-                    if val_reconfigures_engine:
+                    if val_reconfigures_engine or val_groups:
+                        # A dedicated validation group needs the rollout engines
+                        # asleep to have their memory, so collection must be
+                        # genuinely idle -- the same requirement a live
+                        # reconfigure has.
                         ray.get(trajectory_collector.pause_and_drain.remote())
                     else:
                         trajectory_collector.pause.remote()
 
-                    if NEED_REFIT and (
-                        POLICY_GENERATION_STALE
-                        or generation_needs_weight_refit(policy_generation)
-                    ):
-                        refit_policy_generation(
-                            policy, policy_generation, colocated_inference
-                        )
-                        POLICY_GENERATION_STALE = False
-                    else:
-                        policy_generation.prepare_for_generation()
+                    if val_uses_rollout_engines:
+                        if NEED_REFIT and (
+                            POLICY_GENERATION_STALE
+                            or generation_needs_weight_refit(policy_generation)
+                        ):
+                            refit_policy_generation(
+                                policy, policy_generation, colocated_inference
+                            )
+                            POLICY_GENERATION_STALE = False
+                        else:
+                            policy_generation.prepare_for_generation()
+                    elif val_groups:
+                        # Hand the device to the validation groups. `sleep`, not
+                        # `finish_generation`: the latter only resets the prefix
+                        # cache on a non-colocated group, so the reservation
+                        # would never be released and the validation group could
+                        # not claim its own.
+                        policy_generation.sleep()
                     val_metrics, validation_timings = validate(
                         policy_generation,
                         val_dataloader,
@@ -3795,8 +4029,11 @@ def async_grpo_train(
                         step=step + 1,
                         master_config=master_config,
                         logger=logger,
+                        val_groups=val_groups,
+                        prepare_val_generation=_prepare_val_generation,
                     )
-                    policy_generation.finish_generation()
+                    if val_uses_rollout_engines:
+                        policy_generation.finish_generation()
                     logger.log_metrics(
                         validation_timings, step + 1, prefix="timing/validation"
                     )
