@@ -1,0 +1,53 @@
+# PRODUCTION ns_tools multi-turn training run.
+#
+# First real training run -- everything before this was a 2-step smoke test with
+# checkpointing disabled. Differences from the smoke configs:
+#   max_num_steps         2 -> 300
+#   checkpointing         disabled -> enabled, save_period 5
+#   validation            enabled, val_period 10, max_val_samples null
+#                         (null is REQUIRED on the nemo_gym path; the base sets 2000)
+#
+# SHAPE: 16 prompts x 8 generations = 128 rollouts.
+#   Both 128 shapes were validated (2026-09-09, 2 nodes, sandbox container):
+#     8x16  127/128 then 121/128     16x8  123/128 then 123/128
+#   16x8 is chosen for TRAINING because it doubles the number of distinct problems per
+#   gradient step at the same cost, while keeping 8 generations per prompt -- the floor
+#   for a usable leave-one-out GRPO baseline. 8x16 would instead halve advantage variance
+#   within each group; prompt diversity is the better trade for a first run.
+#   6972 train prompts / 16 per step = ~435 steps per epoch, so 300 steps is < 1 epoch.
+#
+# NODES 2 = 1 train + 1 generation (dp 1). Generation is tool-bound rather than
+# compute-bound here (166 sandbox timeouts at exec_timeout_s=10 in the 64-run), so the
+# dp-1 optimizer-step penalty is small, and 2-node requests backfill far more easily on
+# a full cluster.
+#
+# REQUIRES NEMO_SKILLS_SANDBOX=1 at submit: ns_tools tool calls need the nemo_skills
+# sandbox, which ray.sub starts as a job component. Without it every tool call fails.
+defaults: "ar_v30_ns_refreshed.yaml"
+
+cluster:
+  num_nodes: 2
+
+grpo:
+  num_prompts_per_step: 16
+  num_generations_per_prompt: 8
+  max_num_steps: 300
+  val_period: 10
+  val_at_end: true
+  max_val_samples: null
+
+policy:
+  train_global_batch_size: 128
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: "/lustre/fsw/portfolios/coreai/users/snorouzi/checkpoints/ar_v30_ns_prod"
+  save_period: 5
+  metric_name: "val:total_reward/mean"
+  higher_is_better: true
+
+logger:
+  log_dir: "logs/ar-v30-ns-prod"
+  wandb:
+    project: "diffusion_rl"
+    name: "ar_v30_ns_prod"

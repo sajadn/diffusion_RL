@@ -414,6 +414,58 @@ EOF
   sleep 3
 done
 
+# ---------------------------------------------------------------------------
+# nemo_skills code-execution sandbox (opt-in: NEMO_SKILLS_SANDBOX=1).
+#
+# ns_tools executes model-written code through nemo_skills LocalSandbox, which is
+# a CLIENT: it POSTs to http://$NEMO_SKILLS_SANDBOX_HOST:$NEMO_SKILLS_SANDBOX_PORT
+# /execute. The SERVER is a separate job component that upstream launches itself
+# (nemo_skills/pipeline/utils/exp.py:624-631, gpus_per_node=0, one per node).
+# Nothing in NeMo-RL ever started it, so every tool call failed with
+# "Error: Tool execution failed" and multi-turn rollouts were impossible.
+#
+# The image runs uwsgi + nginx with ~128 workers; nginx routes by consistent hash
+# on X-Session-ID with proxy_next_upstream off, so stateful IPython sessions stay
+# pinned to one worker. Containers share the host network here (verified: a
+# different container on the same node reaches both 127.0.0.1:6000 and
+# <node-ip>:6000), so ns_tools' default sandbox_host of 127.0.0.1 needs no change.
+#
+# One per node, because we do not control which node the ns_tools server lands on.
+# ---------------------------------------------------------------------------
+if [[ "${NEMO_SKILLS_SANDBOX:-0}" == "1" ]]; then
+  SANDBOX_IMAGE=${NEMO_SKILLS_SANDBOX_IMAGE:-/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_genai/nemo-rl/nemo-skills-sandbox.sqsh}
+  SANDBOX_PORT=${NEMO_SKILLS_SANDBOX_PORT:-6000}
+  echo "[INFO][$(date)] Starting nemo_skills sandbox on ${#nodes_array[@]} node(s): $SANDBOX_IMAGE"
+  for i in "${!nodes_array[@]}"; do
+    node_i=${nodes_array[$i]}
+    srun --overlap --no-container-mount-home \
+         --container-name=ns-sandbox-$i \
+         --container-image=$SANDBOX_IMAGE \
+         --container-mounts=$MOUNTS \
+         --nodes=1 --ntasks=1 --gpus-per-node=0 -w "$node_i" \
+         -o $LOG_DIR/ns-sandbox-$i.log /start-with-nginx.sh &
+    SRUN_PIDS["ns-sandbox-$i"]=$!
+  done
+  # Block until every node answers /health, so no Gym server can start before its
+  # sandbox is serving. Bounded so a bad image fails the job instead of hanging.
+  for i in "${!nodes_array[@]}"; do
+    node_i=${nodes_array[$i]}
+    tries=0
+    until srun --overlap --nodes=1 --ntasks=1 -w "$node_i" \
+            curl -sS -m 5 "http://127.0.0.1:$SANDBOX_PORT/health" >/dev/null 2>&1; do
+      tries=$((tries+1))
+      if [[ $tries -gt 60 ]]; then
+        echo "[ERROR] nemo_skills sandbox never became healthy on $node_i (see $LOG_DIR/ns-sandbox-$i.log)" >&2
+        touch $LOG_DIR/ENDED
+        exit 1
+      fi
+      check_srun_processes || exit 1
+      sleep 5
+    done
+    echo "[INFO][$(date)] sandbox healthy on $node_i"
+  done
+fi
+
 # Then we wait here for the file to be created by the head node container
 while check_srun_processes && ! srun --overlap --nodes=1 --ntasks=1 -w $head_node test -f $LOG_DIR/STARTED_RAY_HEAD; do
   echo "[INFO][$(date)] Waiting for head node container to start..."

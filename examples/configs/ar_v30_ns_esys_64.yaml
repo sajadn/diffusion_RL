@@ -1,0 +1,28 @@
+# ns_tools multi-turn at 64 concurrent rollouts -- bisecting the sandbox ceiling.
+#
+# 16 (ar_v30_ns_esys_small.yaml)  -> WORKS: 16/16 multi-turn, 0 errors, run COMPLETED 31min,
+#                                   sandbox peaked at 48 sessions.
+# 128 (ar_v30_ns_refreshed.yaml)  -> WEDGES: sessions flat at 202-253, GPUs 0%, no rollouts.
+#                                   Confirmed TWICE (runs 18156660, 18161315), the second
+#                                   WITH NEMO_SKILLS_SANDBOX_SESSION_TIMEOUT=600 active.
+#
+# Session cleanup does not help because it only reclaims IDLE sessions: at high concurrency
+# requests block inside the single-process Flask sandbox, so sessions never go idle and
+# nothing is reclaimed. The binding constraint is sandbox THROUGHPUT, not session lifetime.
+# The real fix is a multi-worker sandbox deployment (its WORKER_NUM env var implies one,
+# but nemo_skills ships no launcher for it).
+defaults: "ar_v30_ns_refreshed.yaml"
+
+grpo:
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 8
+  max_num_steps: 2
+
+policy:
+  train_global_batch_size: 64
+
+logger:
+  log_dir: "logs/ar-v30-ns-esys-64"
+  wandb:
+    project: "diffusion_rl"
+    name: "ar_v30_ns_esys_64"

@@ -1,0 +1,125 @@
+# ns_tools multi-turn tool calling on the refreshed 2026-09-02 checkpoint.
+#
+# Shared base for ar_v30_ns_esys_64.yaml (production) and ar_v30_ns_esys_small.yaml
+# (control); those differ from this file only in batch shape. Not run directly.
+#
+# ============================================================================
+# FIVE FIXES were required to make multi-turn work at all. Baseline before them
+# was 0/1920 samples closing the tool loop; after, 62/64.
+#
+# 1. CHECKPOINT (below). The local copy was from 2026-07-08, two weight revisions
+#    behind (2026-07-23 -> step_10000; 2026-08-06 -> ada step_9000). Identical
+#    tensor names kept the file SIZE unchanged at 16,979,144,720 B, so only sha256
+#    revealed it:
+#      stale     0e8485daa7c0c92b747c094685368d218ff2129a5160f5a59fc507148dd3b136
+#      refreshed ae7be4d9d94572012888748d822a1f63b0704458343c5065b9d7b0193fa6dd8e
+#    Same prompt, ar_generate, temp 1.0, n=8:
+#      refreshed -> XML <function=stateful_python_code_exec>  (correct)
+#      stale     -> hermes/bare JSON named "python"            (wrong)
+#    ALWAYS verify HF weights by sha256 against the LFS oid, never by size.
+#
+# 2. SANDBOX. Nothing in NeMo-RL, ray.sub, the submit script, or Gym ever started
+#    the nemo_skills local sandbox, so every tool call failed. Fixed in the Gym
+#    submodule: resources_servers/ns_tools/app.py now spawns it in setup_webserver().
+#
+# 3. CHAT TEMPLATE (below). The checkpoint's own template injects "You are not
+#    allowed to use any tools." whenever messages[0] is not a system message --
+#    which is every ns_tools row. Declaring <tools> AND forbidding them made the
+#    model emit `<function=>` with an EMPTY NAME (88/88 in run 18144254).
+#
+# 4. max_new_tokens 8192 (below), plus a guard in the Gym submodule at
+#    responses_api_agents/simple_agent/app.py. At 4096 with a 2048 thinking budget
+#    only ~2048 remained for the call, and this model writes its derivation INSIDE
+#    the `code` argument as `#` comments. The call was cut mid-string, step3p5
+#    accumulated partial arguments (step3p5_tool_parser.py:641), and the NEXT turn
+#    could not json.loads it -> HTTP 500 -> trajectory lost -> ReplayBuffer stalled
+#    forever (run 18147448: zero rollouts in 2h). rollouts.py:1154 maps
+#    max_new_tokens -> max_output_tokens, so this cap really binds.
+#
+# 5. CONCURRENCY, set by the child configs. The sandbox spawns one IPython
+#    SUBPROCESS per session, so 128 concurrent rollouts reach ~253 processes and
+#    wedge the node (GPUs 0%, no rollouts). 64 works, 128 does not.
+# ============================================================================
+#
+# ns_tools is the agent that can actually close a loop: simple_agent.run() has a
+# real `while True` that extracts function_call items, executes the tool, and
+# appends function_call_output.
+#
+# PASS: samples with >=2 trainable segments in token_loss_mask, i.e.
+#       [prompt:0][call:1][tool output:0][answer:1], with the tool_response
+#       carrying REAL output rather than an {"error": ...} echo.
+defaults: "nemotron_labs_diffusion_8b_vllm_ar_async_grpo_nemogym_v30_8t8g.yaml"
+
+cluster:
+  num_nodes: 3          # 2 train + 1 gen
+
+grpo:
+  # Defaults; both child configs override the batch shape.
+  num_prompts_per_step: 8
+  num_generations_per_prompt: 16
+  max_num_steps: 3
+  val_period: 100
+  val_at_end: false
+
+policy:
+  model_name: /lustre/fsw/portfolios/coreai/users/snorouzi/checkpoints/Nemotron-Labs-Diffusion-8B-v1.5-sft-20260902
+  train_global_batch_size: 128
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  tokenizer:
+    # The checkpoint's OWN chat_template.jinja with exactly ONE line changed
+    # (line 28: the default system message -> ""). See fix 3 above. Verified by
+    # rendering a real ns_tools row: prohibition gone, <tools> still declared.
+    # Set on BOTH sides -- the training side re-renders the conversation into
+    # token_ids/token_loss_mask (algorithms/utils.py:328 reads .jinja from file),
+    # the serving side builds the prompt the model generates from. If only one is
+    # set the two disagree and you train on tokens the model never saw.
+    chat_template: "/home/snorouzi/diffusion_RL/RL/examples/configs/chat_templates/nld_v15sft_20260902_emptysys.jinja"
+    chat_template_kwargs:
+      enable_thinking: true
+      reasoning_budget: 2048
+  generation:
+    max_new_tokens: 8192          # fix 4
+    colocated:
+      resources:
+        num_nodes: 1
+    vllm_cfg:
+      http_server_serving_chat_kwargs:
+        chat_template: "/home/snorouzi/diffusion_RL/RL/examples/configs/chat_templates/nld_v15sft_20260902_emptysys.jinja"
+    vllm_kwargs:
+      # ENGINE-level reasoning_parser, NOT the same knob as
+      # vllm_cfg.http_server_serving_chat_kwargs.reasoning_parser (which configures
+      # the SERVING layer). The thinking budget is enforced in the SAMPLER and gates
+      # on vllm_config.reasoning_config.enabled, built from EngineArgs.reasoning_parser.
+      # Without this every request carrying thinking_token_budget is rejected at
+      # input_processor.py:102 with VLLMValidationError -- measured 410 raises and
+      # 78,850 EngineGenerateErrors, i.e. 100% rollout failure and zero steps.
+      reasoning_parser: step3p5
+
+env:
+  nemo_gym:
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          uses_reasoning_parser: true
+          chat_template_kwargs:
+            enable_thinking: true
+            reasoning_budget: 2048
+          extra_body:
+            thinking_token_budget: 2048   # engine forces </think> at N
+
+data:
+  train:
+    data_path: "/lustre/fsw/portfolios/coreai/users/snorouzi/diffusion_rl/dataset/v30_deterministic/ns_tools_only/train.jsonl"
+  validation:
+    data_path: "/lustre/fsw/portfolios/coreai/users/snorouzi/diffusion_rl/dataset/v30_deterministic/ns_tools_only/val.jsonl"
+    repeat: 1
+
+checkpointing:
+  enabled: false
+
+logger:
+  log_dir: "logs/ar-v30-ns-refreshed-emptysys"
+  wandb:
+    project: "diffusion_rl"
+    name: "ar_v30_ns_refreshed_emptysys"
