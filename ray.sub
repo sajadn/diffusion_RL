@@ -435,19 +435,27 @@ done
 if [[ "${NEMO_SKILLS_SANDBOX:-0}" == "1" ]]; then
   SANDBOX_IMAGE=${NEMO_SKILLS_SANDBOX_IMAGE:-/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_genai/nemo-rl/nemo-skills-sandbox.sqsh}
   SANDBOX_PORT=${NEMO_SKILLS_SANDBOX_PORT:-6000}
+  # NO --container-mounts: this sandbox executes model-written code. Upstream runs it
+  # with keep_mounts=False ("safer: sandbox has no access to mounted paths"). Mounting
+  # $MOUNTS would give generated code read-write access to /home and all of /lustre,
+  # including the checkpoint_dir the same job is writing. /start-with-nginx.sh ships in
+  # the image and srun writes the -o log on the batch host, so nothing here needs mounts.
   echo "[INFO][$(date)] Starting nemo_skills sandbox on ${#nodes_array[@]} node(s): $SANDBOX_IMAGE"
   for i in "${!nodes_array[@]}"; do
     node_i=${nodes_array[$i]}
     srun --overlap --no-container-mount-home \
          --container-name=ns-sandbox-$i \
          --container-image=$SANDBOX_IMAGE \
-         --container-mounts=$MOUNTS \
          --nodes=1 --ntasks=1 --gpus-per-node=0 -w "$node_i" \
          -o $LOG_DIR/ns-sandbox-$i.log /start-with-nginx.sh &
     SRUN_PIDS["ns-sandbox-$i"]=$!
   done
   # Block until every node answers /health, so no Gym server can start before its
   # sandbox is serving. Bounded so a bad image fails the job instead of hanging.
+  # NOTE: /start-with-nginx.sh must BLOCK for the lifetime of the sandbox. It is tracked
+  # in SRUN_PIDS, and check_srun_processes tests liveness only -- if the entrypoint ever
+  # returned after backgrounding nginx, the next check would kill the whole job with a
+  # misleading "Background srun 'ns-sandbox-0' died".
   for i in "${!nodes_array[@]}"; do
     node_i=${nodes_array[$i]}
     tries=0
@@ -459,7 +467,7 @@ if [[ "${NEMO_SKILLS_SANDBOX:-0}" == "1" ]]; then
         touch $LOG_DIR/ENDED
         exit 1
       fi
-      check_srun_processes || exit 1
+      check_srun_processes
       sleep 5
     done
     echo "[INFO][$(date)] sandbox healthy on $node_i"

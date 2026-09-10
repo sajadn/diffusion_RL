@@ -1,7 +1,19 @@
 # ns_tools multi-turn tool calling on the refreshed 2026-09-02 checkpoint.
 #
-# Shared base for ar_v30_ns_esys_64.yaml (production) and ar_v30_ns_esys_small.yaml
-# (control); those differ from this file only in batch shape. Not run directly.
+# Shared base. Children differ from it only in batch shape / step count:
+#   ar_v30_ns_prod.yaml       PRODUCTION training run (16x8 = 128, 300 steps, ckpt on)
+#   ar_v30_ns_esys_64.yaml    smoke test (8x8 = 64, 2 steps)
+#
+# NOTE the chat_template paths below are ABSOLUTE and therefore not portable to another
+# checkout or user. The file itself lives in-repo at examples/configs/chat_templates/,
+# so a repo-relative path would be preferable -- but the training side resolves it in the
+# driver (CWD = repo root) while the serving side resolves it inside a vLLM Ray actor,
+# whose CWD is not guaranteed to be the same. Making them relative needs a run to verify;
+# until then absolute is the safe choice.
+# Not run directly.
+#
+# Full write-up of the five causes below, with measurements and file:line references:
+#   plans/ar_nemogym_tool_calling.md
 #
 # ============================================================================
 # FIVE FIXES were required to make multi-turn work at all. Baseline before them
@@ -18,9 +30,12 @@
 #      stale     -> hermes/bare JSON named "python"            (wrong)
 #    ALWAYS verify HF weights by sha256 against the LFS oid, never by size.
 #
-# 2. SANDBOX. Nothing in NeMo-RL, ray.sub, the submit script, or Gym ever started
-#    the nemo_skills local sandbox, so every tool call failed. Fixed in the Gym
-#    submodule: resources_servers/ns_tools/app.py now spawns it in setup_webserver().
+# 2. SANDBOX. nemo_skills LocalSandbox is a CLIENT; the server is a separate job
+#    component upstream starts itself (pipeline/utils/exp.py:624-631). Nothing in
+#    NeMo-RL did, so every tool call failed. Fixed in ray.sub, NOT in Gym: set
+#    NEMO_SKILLS_SANDBOX=1 at submit and it launches one per node.
+#    (ns_tools/app.py is byte-identical to upstream -- an earlier in-Gym spawner was
+#     reverted once the launcher took over.)
 #
 # 3. CHAT TEMPLATE (below). The checkpoint's own template injects "You are not
 #    allowed to use any tools." whenever messages[0] is not a system message --
@@ -36,9 +51,11 @@
 #    forever (run 18147448: zero rollouts in 2h). rollouts.py:1154 maps
 #    max_new_tokens -> max_output_tokens, so this cap really binds.
 #
-# 5. CONCURRENCY, set by the child configs. The sandbox spawns one IPython
-#    SUBPROCESS per session, so 128 concurrent rollouts reach ~253 processes and
-#    wedge the node (GPUs 0%, no rollouts). 64 works, 128 does not.
+# 5. CONCURRENCY, set by the child configs. The sandbox spawns one IPython SUBPROCESS
+#    per session. Against the OLD single-process sandbox 128 rollouts reached ~253
+#    processes and wedged the node (GPUs 0%, no rollouts, twice). With the container
+#    (~128 uwsgi workers behind nginx) 128 WORKS: 8x16 gave 127/128 then 121/128 and
+#    16x8 gave 123/128 twice, both COMPLETED on 2 nodes.
 # ============================================================================
 #
 # ns_tools is the agent that can actually close a loop: simple_agent.run() has a
