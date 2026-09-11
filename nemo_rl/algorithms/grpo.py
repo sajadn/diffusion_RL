@@ -3611,7 +3611,6 @@ def async_grpo_train(
 
     # Run validation at start if configured
     if val_at_start and step == 0:
-        rollout_slept_for_validation = False
         print("\n🔍 Running initial validation...")
         # Pause trajectory collection during initial validation
         if val_reconfigures_engine or val_groups:
@@ -3626,7 +3625,6 @@ def async_grpo_train(
                 # a non-colocated group, so the reservation would never be
                 # released.
                 policy_generation.sleep()
-                rollout_slept_for_validation = True
             val_metrics, validation_timings = validate(
                 policy_generation,
                 val_dataloader,
@@ -3654,7 +3652,13 @@ def async_grpo_train(
             # here rather than in the try: initial validation is optional and its
             # failure is swallowed above, but resuming collection onto a sleeping
             # engine is not survivable, so a failed restore is fatal.
-            if rollout_slept_for_validation and not policy_generation.wake_up():
+            #
+            # `wake_up` is idempotent, so this runs whenever validation groups
+            # exist rather than tracking who slept them. `validate` sleeps them
+            # itself to hand the device to a dedicated variant, and if the
+            # PRIMARY variant raises there, it propagates out before `validate`
+            # can restore them -- a case the caller's own flag cannot see.
+            if val_groups and not policy_generation.wake_up():
                 raise RuntimeError(
                     "Failed to wake the rollout engines after initial validation; "
                     "trajectory collection would generate on a sleeping engine."
