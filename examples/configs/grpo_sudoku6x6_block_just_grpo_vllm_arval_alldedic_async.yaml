@@ -1,0 +1,38 @@
+# AR + diffusion validation with BOTH decodes on dedicated engine groups,
+# NON-colocated + async GRPO. Sibling of
+# ..._fast_async_grpo_arval.yaml, which runs diffusion as a soft-knob
+# reconfigure of the rollout engines instead.
+#
+# WHY THIS EXISTS. With every variant dedicated, val_uses_rollout_engines is
+# False: async_grpo_train sleeps the rollout engines to hand the device over and
+# must wake them again before the trajectory collector resumes, or collection
+# generates on a sleeping engine. That path is not reached by the mixed config.
+defaults: "grpo_sudoku6x6_block_just_grpo_vllm_fast_async_grpo.yaml"
+
+policy:
+  generation:
+    vllm_val_dllm_overrides: null
+    vllm_val_dllm_variants:
+      diffusion:
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          diffusion_config:
+            selection_policy: "confidence_threshold"
+            confidence_threshold: 0.9
+            temperature: 1.0
+      ar:
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          diffusion_config: null
+          hf_overrides:
+            architectures: ["NemotronLabsDiffusionForCausalLM"]
+
+checkpointing:
+  checkpoint_dir: "results/grpo-nd3b-bjgf-sudoku6x6-arval-alldedic-async"
+
+logger:
+  log_dir: "logs/grpo-nd3b-bjgf-sudoku6x6-arval-alldedic-async"
+  wandb:
+    name: "grpo-nd3b-bjgf-sudoku6x6-arval-alldedic-async"

@@ -1122,13 +1122,15 @@ class MegatronPolicyWorkerImpl(AbstractPolicyWorker, ColocatablePolicyInterface)
 
     @torch.no_grad()
     def broadcast_weights_for_collective(
-        self, kv_scales: Optional[dict[str, float]] = None
+        self,
+        kv_scales: Optional[dict[str, float]] = None,
+        generation_group: Optional[str] = None,
     ) -> None:
         """Broadcast the weights for collective communication."""
         # param_iterator will return (name, tensor), we only need tensor.
         packed_broadcast_producer(
             iterator=self._iter_params_with_optional_kv_scales(kv_scales=kv_scales),
-            group=self.model_update_group,
+            group=self._model_update_group(generation_group),
             src=0,
             post_iter_func=lambda x: x[1],
         )

@@ -1,0 +1,54 @@
+# Block JustGRPO-Fast on 6x6 Sudoku, async vLLM + async-GRPO, validating under
+# BOTH the rollout diffusion decode and an AR reference in the same cycle.
+#
+# WHY TWO DECODES. On a diffusion LLM the sampler is part of the policy, so a
+# single validation curve cannot separate "the weights degraded" from "the
+# sampler stopped working on these weights". An AR reference answers that: if
+# the AR curve holds while the diffusion one falls, the damage is in the
+# sampler, not the model.
+#
+# WHY TWO ENGINE GROUPS. AR vs diffusion is decided when the vLLM engine loads --
+# hf_overrides.architectures picks the causal-LM class and diffusion_config null
+# drops the canvas -- so no runtime reconfigure can reach it. A variant carrying
+# vllm_cfg therefore gets a dedicated engine group, launched with those settings
+# baked in and refit from the policy right before its pass.
+#
+# ORDER MATTERS. The FIRST variant is primary: it fills the unsuffixed
+# val:accuracy that drives keep_top_k checkpoint selection. It is the
+# rollout-matching diffusion decode on purpose, so selection keeps measuring the
+# same quantity as every earlier run; AR is a diagnostic curve reported beside it
+# as val:accuracy/ar.
+#
+# MEMORY. The validation groups and the rollout engines time-share the device --
+# only one is ever awake, and async collection is drained before any of them
+# wakes -- so their gpu_memory_utilization budgets may overlap. Each group must
+# still state its own rather than inherit the rollout group's.
+defaults: "grpo_sudoku6x6_block_just_grpo_vllm_fast_async_grpo.yaml"
+
+policy:
+  generation:
+    # Superseded by the variants below; left explicit so the inherited
+    # single-decode override is not silently ignored.
+    vllm_val_dllm_overrides: null
+    vllm_val_dllm_variants:
+      diffusion:
+        vllm_kwargs:
+          diffusion_config:
+            selection_policy: "confidence_threshold"
+            confidence_threshold: 0.9
+            temperature: 1.0
+      ar:
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          diffusion_config: null
+          hf_overrides:
+            architectures: ["NemotronLabsDiffusionForCausalLM"]
+
+checkpointing:
+  checkpoint_dir: "results/grpo-nd3b-bjgf-sudoku6x6-vllm-async-grpo-arval"
+
+logger:
+  log_dir: "logs/grpo-nd3b-bjgf-sudoku6x6-vllm-async-grpo-arval"
+  wandb:
+    name: "grpo-nd3b-bjgf-sudoku6x6-vllm-async-grpo-arval"

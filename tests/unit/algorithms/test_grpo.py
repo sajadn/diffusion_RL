@@ -25,7 +25,9 @@ from nemo_rl.algorithms.advantage_estimator import (
     ReinforcePlusPlusAdvantageEstimator,
 )
 from nemo_rl.algorithms.grpo import (
+    _build_val_generation_config,
     _default_grpo_save_state,
+    _val_engine_group_overrides,
     async_grpo_train,
     compute_and_apply_seq_logprob_error_masking,
     dynamic_sampling,
@@ -2474,3 +2476,117 @@ class TestComputeAndApplySeqLogprobErrorMasking:
         # At least sequence 2 should be masked
         assert num_masked >= 1, "At least one sequence should be masked"
         assert train_data["sample_mask"][0] == 1.0, "Sequence 0 should be kept"
+
+
+class TestValEngineGroups:
+    """Selecting and building the dedicated validation engine groups.
+
+    These are the pure helpers behind validating under AR and diffusion in one
+    cycle: the mode is fixed when the vLLM engine loads, so a decode that
+    changes it needs an engine group of its own rather than a reconfigure.
+    """
+
+    def rollout_config(self):
+        """A diffusion rollout generation config, as the vLLM configs build it."""
+        return {
+            "backend": "vllm",
+            "temperature": 1.0,
+            "colocated": {"enabled": True},
+            "vllm_cfg": {"gpu_memory_utilization": 0.55, "async_engine": True},
+            "vllm_kwargs": {
+                "diffusion_config": {
+                    "canvas_length": 16,
+                    "selection_policy": "leftmost",
+                    "temperature": 1.0,
+                },
+                "hf_overrides": {"block_size": 16},
+            },
+        }
+
+    def ar_variant(self):
+        """The AR reference decode: its own engine, no canvas, causal-LM class."""
+        return {
+            "temperature": 1.0,
+            "vllm_cfg": {"gpu_memory_utilization": 0.3},
+            "vllm_kwargs": {
+                "diffusion_config": None,
+                "hf_overrides": {
+                    "architectures": ["NemotronLabsDiffusionForCausalLM"]
+                },
+            },
+        }
+
+    def test_soft_knob_variants_stay_on_the_rollout_engines(self):
+        cfg = self.rollout_config()
+        cfg["vllm_val_dllm_variants"] = {
+            "conf09": {
+                "vllm_kwargs": {"diffusion_config": {"confidence_threshold": 0.9}}
+            },
+        }
+        assert _val_engine_group_overrides(cfg) == {}
+
+    def test_only_the_engine_level_variant_gets_a_group(self):
+        cfg = self.rollout_config()
+        cfg["vllm_val_dllm_variants"] = {
+            "diffusion": {
+                "vllm_kwargs": {"diffusion_config": {"confidence_threshold": 0.9}}
+            },
+            "ar": self.ar_variant(),
+        }
+        assert list(_val_engine_group_overrides(cfg)) == ["ar"]
+
+    def test_legacy_single_override_is_the_unnamed_group(self):
+        cfg = self.rollout_config()
+        cfg["vllm_val_dllm_overrides"] = self.ar_variant()
+        assert list(_val_engine_group_overrides(cfg)) == [""]
+
+    def test_variants_take_precedence_over_the_single_override(self):
+        cfg = self.rollout_config()
+        cfg["vllm_val_dllm_overrides"] = self.ar_variant()
+        cfg["vllm_val_dllm_variants"] = {
+            "conf09": {
+                "vllm_kwargs": {"diffusion_config": {"confidence_threshold": 0.9}}
+            },
+        }
+        assert _val_engine_group_overrides(cfg) == {}
+
+    def test_other_backends_key_is_inert(self):
+        """Configs routinely inherit the other backend's key from a shared parent."""
+        cfg = self.rollout_config()
+        cfg["sglang_val_dllm_overrides"] = {"sglang_cfg": {"dllm_algorithm": "x"}}
+        assert _val_engine_group_overrides(cfg) == {}
+
+    def test_ar_group_drops_the_canvas_and_selects_the_causal_lm(self):
+        """The deep merge must replace diffusion_config wholesale, not merge into it.
+
+        A merged diffusion_config would leave the canvas in place and the engine
+        would serve masked-canvas diffusion no matter what architectures says.
+        """
+        cfg = self.rollout_config()
+        val_cfg = _build_val_generation_config(cfg, self.ar_variant())
+
+        assert val_cfg["vllm_kwargs"]["diffusion_config"] is None
+        assert val_cfg["vllm_kwargs"]["hf_overrides"]["architectures"] == [
+            "NemotronLabsDiffusionForCausalLM"
+        ]
+        # Untouched keys are inherited, including the sibling hf_override.
+        assert val_cfg["vllm_kwargs"]["hf_overrides"]["block_size"] == 16
+        assert val_cfg["vllm_cfg"]["async_engine"] is True
+        # The group's own budget wins over the rollout group's.
+        assert val_cfg["vllm_cfg"]["gpu_memory_utilization"] == 0.3
+        # The rollout config is not mutated.
+        assert cfg["vllm_kwargs"]["diffusion_config"]["canvas_length"] == 16
+
+    def test_group_config_cannot_recurse_into_another_group(self):
+        cfg = self.rollout_config()
+        cfg["vllm_val_dllm_variants"] = {"ar": self.ar_variant()}
+        val_cfg = _build_val_generation_config(cfg, self.ar_variant())
+        assert val_cfg["vllm_val_dllm_overrides"] is None
+        assert val_cfg["vllm_val_dllm_variants"] is None
+
+    def test_group_must_state_its_own_memory_budget(self):
+        """Inheriting the rollout group's utilization is the mistake to catch."""
+        overrides = self.ar_variant()
+        overrides["vllm_cfg"] = {}
+        with pytest.raises(AssertionError, match="gpu_memory_utilization"):
+            _build_val_generation_config(self.rollout_config(), overrides)

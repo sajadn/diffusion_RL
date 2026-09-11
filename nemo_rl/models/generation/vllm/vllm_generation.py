@@ -58,6 +58,8 @@ class VllmGeneration(GenerationInterface):
         # namespaces the refit ZMQ sockets, so a second (validation-only) group
         # colocated on the same GPUs does not share the rollout group's.
         self.name_prefix = name_prefix
+        # Whether this group has yielded its GPU memory via `sleep`.
+        self._is_sleeping = False
         self.tp_size = self.cfg["vllm_cfg"]["tensor_parallel_size"]
         self.pp_size = self.cfg["vllm_cfg"]["pipeline_parallel_size"]
         self.ep_size = self.cfg["vllm_cfg"]["expert_parallel_size"]
@@ -747,11 +749,55 @@ class VllmGeneration(GenerationInterface):
         ):
             yield result
 
+    def sleep(self) -> bool:
+        """Release this group's GPU memory, colocated or not.
+
+        `finish_generation` deliberately skips the sleep for a non-colocated
+        group. A dedicated validation group sharing the inference GPUs with the
+        rollout engines must sleep anyway, so this dispatches the real
+        sleep/sleep_async regardless. Idempotent.
+        """
+        if self._is_sleeping:
+            return True
+        ok = self._run_sleep_or_wake(
+            "sleep_async" if self.cfg["vllm_cfg"]["async_engine"] else "sleep"
+        )
+        self._is_sleeping = ok
+        return ok
+
+    def wake_up(self, **kwargs: Any) -> bool:
+        """Reclaim the memory released by `sleep`. Idempotent."""
+        if not self._is_sleeping:
+            return True
+        ok = self._run_sleep_or_wake(
+            "wake_up_async" if self.cfg["vllm_cfg"]["async_engine"] else "wake_up",
+            **kwargs,
+        )
+        self._is_sleeping = not ok
+        return ok
+
+    def _run_sleep_or_wake(self, method_name: str, **kwargs: Any) -> bool:
+        """Run a sleep/wake worker method on every engine in this group."""
+        try:
+            futures = self.worker_group.run_all_workers_single_data(
+                method_name,
+                run_rank_0_only_axes=["tensor_parallel", "pipeline_parallel"],
+                **kwargs,
+            )
+            results = ray.get(futures)
+            return all(result for result in results if result is not None)
+        except Exception as e:
+            print(f"Error during {method_name}: {e}")
+            return False
+
     def prepare_for_generation(self, *args: Any, **kwargs: Any) -> bool:
         """Wake workers up for colocated inference."""
         # non-colocated no need to wake up
         if not self.cfg["colocated"]["enabled"]:
             return True
+        # Keep `_is_sleeping` honest: the colocated path wakes the engine too,
+        # and `refit_policy_generation` drives it directly on a validation group.
+        self._is_sleeping = False
 
         try:
             # Choose the appropriate method based on async_engine setting
@@ -780,6 +826,7 @@ class VllmGeneration(GenerationInterface):
                 method_name = (
                     "sleep_async" if self.cfg["vllm_cfg"]["async_engine"] else "sleep"
                 )
+                self._is_sleeping = True
             else:
                 method_name = (
                     "reset_prefix_cache_async"

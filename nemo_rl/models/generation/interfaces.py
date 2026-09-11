@@ -254,6 +254,24 @@ class GenerationInterface(ABC):
     def finish_generation(self, *args: Any, **kwargs: Any) -> bool:
         pass
 
+    def sleep(self) -> bool:
+        """Release this engine group's GPU memory until `wake_up`.
+
+        Distinct from `finish_generation`, which for a NON-colocated group only
+        resets the prefix cache: such a group owns its GPUs outright, so it has
+        nothing to yield memory to. That stops being true when a dedicated
+        validation group shares those GPUs with the rollout engines -- it has to
+        give the reservation back between passes, or both groups' budgets must
+        fit side by side and each gets a smaller KV cache.
+
+        Defaults to `finish_generation` for backends with no separate path.
+        """
+        return self.finish_generation()
+
+    def wake_up(self, **kwargs: Any) -> bool:
+        """Reclaim the GPU memory released by `sleep`."""
+        return self.prepare_for_generation(**kwargs)
+
     @property
     def requires_kv_scale_sync(self) -> bool:
         """Whether the generation backend requires KV cache scales synchronization."""

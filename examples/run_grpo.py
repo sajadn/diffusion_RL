@@ -18,7 +18,12 @@ import pprint
 
 from omegaconf import OmegaConf
 
-from nemo_rl.algorithms.grpo import MasterConfig, grpo_train, setup
+from nemo_rl.algorithms.grpo import (
+    MasterConfig,
+    ValEngineGroup,
+    grpo_train,
+    setup,
+)
 from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data.utils import setup_response_data
 from nemo_rl.distributed.virtual_cluster import init_ray
@@ -102,7 +107,7 @@ def main() -> None:
     (
         policy,
         policy_generation,
-        val_policy_generation,
+        val_policy_generations,
         cluster,
         dataloader,
         val_dataloader,
@@ -112,6 +117,14 @@ def main() -> None:
         grpo_state,
         master_config,
     ) = setup(config, tokenizer, dataset, val_dataset)
+
+    # Dedicated validation engine groups reuse the rollout validation envs; only
+    # the NeMo-Gym path needs an env of its own per group, since there generation
+    # goes to servers whose base URLs are fixed when the env is built.
+    val_groups = {
+        name: ValEngineGroup(generation=generation, task_to_env=None)
+        for name, generation in val_policy_generations.items()
+    }
 
     # Check if async mode is enabled
     if "async_grpo" in config["grpo"] and config["grpo"]["async_grpo"]["enabled"]:
@@ -163,6 +176,7 @@ def main() -> None:
             grpo_save_state=grpo_state,
             master_config=master_config,
             max_trajectory_age_steps=async_config["max_trajectory_age_steps"],
+            val_groups=val_groups,
         )
     else:
         print("🚀 Running synchronous GRPO training")
@@ -181,7 +195,7 @@ def main() -> None:
             checkpointer,
             grpo_state,
             master_config,
-            val_policy_generation=val_policy_generation,
+            val_groups=val_groups,
         )
 
 
