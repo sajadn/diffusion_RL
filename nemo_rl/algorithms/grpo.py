@@ -730,8 +730,10 @@ def setup(
         if generation_config["backend"] == "megatron":
             max_colocated_worker_groups = 1
         elif val_needs_server_group:
-            # policy + rollout servers + validation servers share each GPU
-            max_colocated_worker_groups = 3
+            # policy + rollout servers + one group per dedicated validation
+            # decode share each GPU. A sleeping group still holds its Ray
+            # reservation, so capacity has to cover all of them at once.
+            max_colocated_worker_groups = 2 + num_val_engine_groups
         else:
             max_colocated_worker_groups = 2
         cluster = RayVirtualCluster(
@@ -1888,7 +1890,12 @@ def grpo_train(
         # dies in pack_tensor with a bare "CUDA error: invalid argument".
         if colocated_inference:
             policy.prepare_for_lp_inference()
-        generation.wake_up()
+        else:
+            # Non-colocated refit never wakes the engine itself. The colocated
+            # path does, in stages -- weights, transfer, offload the policy, then
+            # kv_cache -- so waking everything here would defeat that staging and
+            # hold the KV cache through the weight transfer.
+            generation.wake_up()
         refit_policy_generation(
             policy,
             generation,
@@ -3444,7 +3451,9 @@ def async_grpo_train(
         # dies in pack_tensor with a bare "CUDA error: invalid argument".
         if colocated_inference:
             policy.prepare_for_lp_inference()
-        generation.wake_up()
+        else:
+            # See the synchronous hook: the colocated refit stages its own wake.
+            generation.wake_up()
         refit_policy_generation(policy, generation, colocated_inference)
 
     # True when at least one validation decode runs on the rollout engines.
@@ -3589,8 +3598,11 @@ def async_grpo_train(
 
         try:
             if val_groups and not val_uses_rollout_engines:
-                # Hand the device to the validation groups.
-                policy_generation.finish_generation()
+                # Hand the device to the validation groups. `sleep`, not
+                # `finish_generation`: the latter only resets the prefix cache on
+                # a non-colocated group, so the reservation would never be
+                # released.
+                policy_generation.sleep()
             val_metrics, validation_timings = validate(
                 policy_generation,
                 val_dataloader,
@@ -3604,6 +3616,11 @@ def async_grpo_train(
             )
             if val_uses_rollout_engines:
                 policy_generation.finish_generation()
+            elif val_groups:
+                # We slept them above to hand the device over; collection
+                # resumes in the `finally` below and would otherwise generate on
+                # a sleeping engine.
+                policy_generation.wake_up()
             logger.log_metrics(val_metrics, step, prefix="validation")
             logger.log_metrics(validation_timings, step, prefix="timing/validation")
             print("✅ Initial validation completed successfully")
@@ -4034,6 +4051,9 @@ def async_grpo_train(
                     )
                     if val_uses_rollout_engines:
                         policy_generation.finish_generation()
+                    elif val_groups:
+                        # Undo the hand-off sleep before collection resumes.
+                        policy_generation.wake_up()
                     logger.log_metrics(
                         validation_timings, step + 1, prefix="timing/validation"
                     )
