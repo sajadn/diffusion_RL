@@ -31,6 +31,11 @@ cluster:
 grpo:
   num_prompts_per_step: 16
   num_generations_per_prompt: 8
+  # 300 steps. Leg 1 (job 18242452) paced at ~17 min/step uncapped and reached step 14 in
+  # the 4h window; with the agent tool loop now capped at 20 turns (ns_tools.yaml) the pace
+  # should improve, but this still needs many continuation legs. Every leg must reuse
+  # RUN_NAME (so checkpoint_dir resolves and get_latest_checkpoint_path resumes) and keep
+  # NODES=2 -- Megatron distributed-optimizer state does not reshard across DP widths.
   max_num_steps: 300
   val_period: 10
   val_at_end: true
