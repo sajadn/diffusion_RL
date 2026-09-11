@@ -1,0 +1,54 @@
+# PRODUCTION ns_tools training at the established 10t6g topology.
+#
+# Same shape as the earlier nd8b_ar_v30_10t6g run (16 nodes = 10 train + 6 gen,
+# 120 x 16 = 1920 rollouts/step, gbs 1920, TP 8 / CP 1 -> dp 10 = 192 per rank,
+# 300 steps), but on the ns_tools subset with every multi-turn fix in place.
+#
+# Deltas from that run:
+#   dataset         full v30 -> ns_tools_only (the only subset with a working tool loop)
+#   checkpoint      stale    -> ...-v1.5-sft-20260902 (sha256-verified)
+#   chat template   default  -> nld_v15sft_20260902_emptysys.jinja (no tool prohibition)
+#   max_new_tokens  4096     -> 8192 (4096 minus a 2048 thinking budget truncated calls
+#                                     mid-string, which poisoned whole trajectories)
+#   agent turns     50       -> 20 (ns_tools.yaml; 74.4% finish naturally, 25.6% truncated)
+#   sandbox         none     -> ray.sub job component, REQUIRES NEMO_SKILLS_SANDBOX=1
+#
+# SCALE CAVEAT: multi-turn was validated at 128 rollouts on 2 nodes (2 sandboxes), i.e.
+# 64 rollouts per sandbox. This is 1920 over 16 sandboxes = 120 per sandbox, roughly 2x
+# the per-sandbox load ever tested. Each sandbox runs ~128 uwsgi workers so it should
+# hold, but watch active_sessions in $LOG_DIR/ns-sandbox-*.log: a flatline with GPUs at
+# 0% is the saturation signature.
+#
+# DATA NOTE: 6972 prompts / 120 per step = ~58 steps per epoch, so 300 steps is ~5 epochs
+# over this subset.
+defaults: "ar_v30_ns_refreshed.yaml"
+
+cluster:
+  num_nodes: 16          # 10 train + 6 generation
+
+grpo:
+  num_prompts_per_step: 120
+  num_generations_per_prompt: 16
+  max_num_steps: 300
+  val_period: 10
+  val_at_end: true
+  max_val_samples: null
+
+policy:
+  train_global_batch_size: 1920     # 120 x 16; dp 10 -> 192 per rank
+  generation:
+    colocated:
+      resources:
+        num_nodes: 6
+
+checkpointing:
+  enabled: true
+  save_period: 5
+  metric_name: "val:total_reward/mean"
+  higher_is_better: true
+
+logger:
+  log_dir: "logs/ar-v30-ns-prod-10t6g"
+  wandb:
+    project: "diffusion_rl"
+    name: "ar_v30_ns_prod_10t6g"
