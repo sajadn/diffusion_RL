@@ -1912,6 +1912,7 @@ def grpo_train(
     # Run validation at the start if configured
     # TODO: Add validation with kv scales if needed
     if val_at_start and current_step == 0:
+        rollout_slept_for_validation = False
         print("\n🔍 Running initial validation...", flush=True)
         memory_tracker.snapshot_start_of_stage("Initial validation", dir())
 
@@ -1928,6 +1929,14 @@ def grpo_train(
                 POLICY_GENERATION_STALE = False
             else:
                 policy_generation.prepare_for_generation()
+        elif val_groups and not colocated_inference:
+            # Non-colocated `finish_generation` only resets the prefix cache,
+            # so the rollout engines still hold their memory reservation. A
+            # validation group cannot claim the device until they really sleep.
+            # Colocated engines are already asleep here and are woken by the
+            # next refit, so leave those alone.
+            policy_generation.sleep()
+            rollout_slept_for_validation = True
         val_metrics, validation_timings = validate(
             policy_generation,
             val_dataloader,
@@ -1941,6 +1950,8 @@ def grpo_train(
         )
         if val_uses_rollout_engines:
             policy_generation.finish_generation()
+        elif rollout_slept_for_validation:
+            policy_generation.wake_up()
         if val_groups:
             # Weight streaming assumes GPU-resident policy weights (normally
             # guaranteed by the training step preceding every refit), but the
@@ -2534,6 +2545,7 @@ def grpo_train(
                     val_at_end and is_last_step
                 ):
                     memory_tracker.snapshot_start_of_stage("Validation", dir())
+                    rollout_slept_for_validation = False
                     if val_uses_rollout_engines:
                         if NEED_REFIT and (
                             POLICY_GENERATION_STALE
@@ -2550,6 +2562,14 @@ def grpo_train(
                             if colocated_inference:
                                 policy.offload_after_refit()  # unload optimizer to make space for generation
                             policy_generation.prepare_for_generation()
+                    elif val_groups and not colocated_inference:
+                # Non-colocated `finish_generation` only resets the prefix cache,
+                        # so the rollout engines still hold their memory reservation. A
+                        # validation group cannot claim the device until they really sleep.
+                        # Colocated engines are already asleep here and are woken by the
+                        # next refit, so leave those alone.
+                        policy_generation.sleep()
+                        rollout_slept_for_validation = True
                     val_metrics, validation_timings = validate(
                         policy_generation,
                         val_dataloader,
@@ -2563,6 +2583,8 @@ def grpo_train(
                     )
                     if val_uses_rollout_engines:
                         policy_generation.finish_generation()
+                    elif rollout_slept_for_validation:
+                        policy_generation.wake_up()
                     if val_groups:
                         # Restore the GPU-resident-weights invariant for the
                         # next rollout refit (see the val_at_start site).
@@ -3589,6 +3611,7 @@ def async_grpo_train(
 
     # Run validation at start if configured
     if val_at_start and step == 0:
+        rollout_slept_for_validation = False
         print("\n🔍 Running initial validation...")
         # Pause trajectory collection during initial validation
         if val_reconfigures_engine or val_groups:
@@ -3603,6 +3626,7 @@ def async_grpo_train(
                 # a non-colocated group, so the reservation would never be
                 # released.
                 policy_generation.sleep()
+                rollout_slept_for_validation = True
             val_metrics, validation_timings = validate(
                 policy_generation,
                 val_dataloader,
@@ -3616,11 +3640,6 @@ def async_grpo_train(
             )
             if val_uses_rollout_engines:
                 policy_generation.finish_generation()
-            elif val_groups:
-                # We slept them above to hand the device over; collection
-                # resumes in the `finally` below and would otherwise generate on
-                # a sleeping engine.
-                policy_generation.wake_up()
             logger.log_metrics(val_metrics, step, prefix="validation")
             logger.log_metrics(validation_timings, step, prefix="timing/validation")
             print("✅ Initial validation completed successfully")
@@ -3631,6 +3650,15 @@ def async_grpo_train(
             traceback.print_exc()
             # Continue anyway since validation is optional
         finally:
+            # Restore the rollout engines BEFORE resuming collection, and do it
+            # here rather than in the try: initial validation is optional and its
+            # failure is swallowed above, but resuming collection onto a sleeping
+            # engine is not survivable, so a failed restore is fatal.
+            if rollout_slept_for_validation and not policy_generation.wake_up():
+                raise RuntimeError(
+                    "Failed to wake the rollout engines after initial validation; "
+                    "trajectory collection would generate on a sleeping engine."
+                )
             # Resume trajectory collection after initial validation
             trajectory_collector.resume.remote()
 

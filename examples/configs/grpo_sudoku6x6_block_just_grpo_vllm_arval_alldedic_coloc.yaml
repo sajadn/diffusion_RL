@@ -1,0 +1,47 @@
+# AR + diffusion validation with BOTH decodes on dedicated engine groups,
+# colocated. Sibling of ..._arval_coloc.yaml, which runs diffusion as a
+# soft-knob reconfigure of the rollout engines instead.
+#
+# WHY THIS EXISTS. All-dedicated is the configuration the mixed one never
+# reaches: val_uses_rollout_engines is False (the rollout engines sleep through
+# validation and must be woken again afterwards) and num_val_engine_groups is 2,
+# so the colocated cluster needs capacity for FOUR worker groups -- policy,
+# rollout, and one per validation decode. A sleeping group still holds its Ray
+# reservation, so all four must fit at once.
+#
+# Three engine groups at 0.55 over-subscribe the device on purpose: they
+# time-share, only one is ever awake, and sleep() returns the memory.
+defaults: "grpo_sudoku6x6_block_just_grpo_vllm.yaml"
+
+policy:
+  generation:
+    vllm_val_dllm_overrides: null
+    vllm_val_dllm_variants:
+      # Primary: fixed confidence-0.9 protocol, on its own engine rather than by
+      # reconfiguring the rollout engines.
+      diffusion:
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          diffusion_config:
+            selection_policy: "confidence_threshold"
+            confidence_threshold: 0.9
+            temperature: 1.0
+      ar:
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          diffusion_config: null
+          hf_overrides:
+            architectures: ["NemotronLabsDiffusionForCausalLM"]
+
+cluster:
+  num_nodes: 1
+
+checkpointing:
+  checkpoint_dir: "results/grpo-nd3b-bjg-sudoku6x6-arval-alldedic-coloc"
+
+logger:
+  log_dir: "logs/grpo-nd3b-bjg-sudoku6x6-arval-alldedic-coloc"
+  wandb:
+    name: "grpo-nd3b-bjg-sudoku6x6-arval-alldedic-coloc"
