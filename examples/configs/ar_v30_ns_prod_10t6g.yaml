@@ -40,6 +40,46 @@ policy:
     colocated:
       resources:
         num_nodes: 6
+    # ---------------------------------------------------------------------
+    # Validate under BOTH decodes every cycle (vllm_val_dllm_variants).
+    #
+    # This run ROLLS OUT in AR, so the mirror image of the diffusion examples:
+    #   ar         no vllm_cfg -> no dedicated engine. It matches the rollout
+    #              decode, so validation reuses the rollout engines directly.
+    #   diffusion  has vllm_cfg -> gets its OWN engine group, because AR vs
+    #              diffusion is fixed when the engine loads (hf_overrides
+    #              picks the model class) and no runtime knob can change it.
+    #
+    # The diffusion variant must undo BOTH AR overrides from the 8t8g base
+    # (vllm_kwargs.diffusion_config: null and architectures ForCausalLM).
+    # Variants deep-merge onto the base, so `architectures` has to be named
+    # explicitly -- omitting it would leave the causal-LM class in place and
+    # silently validate AR twice.
+    #
+    # confidence_threshold 0.9 is the fixed validation protocol used across the
+    # diffusion runs, so these curves are comparable with them.
+    #
+    # Reading the pair: on a diffusion LLM the sampler is part of the policy. If
+    # the AR curve holds while the diffusion one falls, the damage is in the
+    # sampler rather than the weights.
+    # ---------------------------------------------------------------------
+    vllm_val_dllm_overrides: null
+    vllm_val_dllm_variants:
+      ar:
+        vllm_kwargs:
+          diffusion_config: null
+          hf_overrides:
+            architectures: ["NemotronLabsDiffusionForCausalLM"]
+      diffusion:
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          diffusion_config:
+            selection_policy: "confidence_threshold"
+            confidence_threshold: 0.9
+            temperature: 1.0
+          hf_overrides:
+            architectures: ["NemotronLabsDiffusionModel"]
 
 checkpointing:
   enabled: true
