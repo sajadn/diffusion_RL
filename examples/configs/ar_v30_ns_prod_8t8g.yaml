@@ -1,0 +1,50 @@
+# PRODUCTION ns_tools training at 8 train + 8 generation.
+#
+# Identical experiment to ar_v30_ns_prod_10t6g.yaml (120 x 16 = 1920 rollouts/step,
+# gbs 1920, TP 8 / CP 1, 300 steps, ns_tools_only, 20 agent turns, sandbox required).
+# The ONLY change is the train/generation split: 10t6g -> 8t8g.
+#
+# WHY: job 18372077 (10t6g) was killed at exactly 30:01 by the cluster idle-GPU reaper:
+#   "Cancelled by occupied idle job reaper: 80/128 GPUs idle for 30m, 62% waste"
+#   kill_request_user: svc-hwinf-cs-sched
+# The 80 idle GPUs are the 10 training nodes, which cannot start until step 0 has all
+# 120 prompt groups. Generation reached 102/120 in the window and the job died first.
+# This is a COLD START problem: it recurs on every 4h leg, because each leg refills the
+# replay buffer from empty. Steady state is fine -- once step 0 lands, training and
+# generation overlap and no GPU is idle.
+#
+# 8t8g attacks it from both sides:
+#   +33% generation engines  -> ~5.1 -> ~6.8 prompt groups/min, so 120 groups in ~18 min
+#   idle GPUs 80/128 (62%)   -> 64/128 (50%), below the ratio the reaper complained about
+#
+# COST, MEASURED (5-step probes 2026-08-12, jobs 15642555/61/70, recorded in
+# nemotron_labs_diffusion_8b_vllm_ar_async_grpo_nemogym_v30_8t8g.yaml):
+#    8 train + 8 gen -> 546 s/step
+#   10 train + 6 gen -> 415 s/step
+# i.e. 8t8g is ~31% slower per step in STEADY STATE. Accepted deliberately: a 31% slower
+# run that survives beats a 31% faster one that is reaped before step 1. Note also that
+# those probes predate multi-turn ns_tools and concluded generation was "nearly free"
+# (1-2 s exposed per step); the 20+ minutes of pure generation this run needs for step 0
+# shows generation demand is now much higher, so the 10t6g margin is likely overstated.
+#
+# MARGIN IS THIN: ~18 min of generation on top of ~8 min of startup/engine build lands
+# near 26 of the 30 available minutes. If this is reaped again, the next lever is a
+# reaper exemption from the cluster admins rather than another topology shuffle.
+#
+# SCALE CAVEAT: unchanged from 10t6g -- 1920 rollouts over 16 sandboxes = 120 per sandbox,
+# ~2x the per-sandbox load ever validated. Watch active_sessions in ns-sandbox-*.log.
+#
+# DATA NOTE: 6972 prompts / 120 per step = ~58 steps per epoch, so 300 steps is ~5 epochs.
+defaults: "ar_v30_ns_prod_10t6g.yaml"
+
+cluster:
+  num_nodes: 16          # 8 train + 8 generation
+
+policy:
+  # 120 x 16 = 1920 unchanged; dp 10 -> 8 means 240 per rank (was 192).
+  # train_micro_batch_size stays 1, so this is 240 grad-accumulation steps per rank.
+  train_global_batch_size: 1920
+  generation:
+    colocated:
+      resources:
+        num_nodes: 8     # was 6
