@@ -10,7 +10,8 @@
 #   chat template   default  -> nld_v15sft_20260902_emptysys.jinja (no tool prohibition)
 #   max_new_tokens  4096     -> 8192 (4096 minus a 2048 thinking budget truncated calls
 #                                     mid-string, which poisoned whole trajectories)
-#   agent turns     50       -> 20 (ns_tools.yaml; 74.4% finish naturally, 25.6% truncated)
+#   agent turns     50       -> 10 (ns_tools.yaml; lowered from 20 so step 0 fills
+#                                     before the 30-min idle-GPU reaper deadline)
 #   sandbox         none     -> ray.sub job component, REQUIRES NEMO_SKILLS_SANDBOX=1
 #
 # SCALE CAVEAT: multi-turn was validated at 128 rollouts on 2 nodes (2 sandboxes), i.e.
