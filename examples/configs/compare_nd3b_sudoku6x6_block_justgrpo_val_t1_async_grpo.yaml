@@ -1,0 +1,29 @@
+# Async GRPO and async vLLM counterpart of compare_nd3b_sudoku6x6_block_justgrpo_val_t1.yaml.
+# Preserve four training nodes; add one dedicated generation/validation node.
+defaults: compare_nd3b_sudoku6x6_block_justgrpo_val_t1.yaml
+
+grpo:
+  async_grpo:
+    enabled: true
+    max_trajectory_age_steps: 1
+
+policy:
+  generation:
+    vllm_cfg:
+      async_engine: true
+    colocated:
+      enabled: false
+      resources:
+        num_nodes: 1
+        gpus_per_node: 8
+
+cluster:
+  num_nodes: 5
+
+checkpointing:
+  checkpoint_dir: results/compare_nd3b_sudoku6x6_block_justgrpo_val_t1_async_grpo
+
+logger:
+  log_dir: logs/compare_nd3b_sudoku6x6_block_justgrpo_val_t1_async_grpo
+  wandb:
+    name: compare_nd3b_sudoku6x6_block_justgrpo_val_t1_async_grpo
