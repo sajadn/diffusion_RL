@@ -1,7 +1,6 @@
 # sudoku6x6, ar: rollout T=1.0; AR and confidence-0.9 validation T=1.
 defaults:
-  - deepscaler_nemotron_labs_diffusion_3b_sglang_ar_megatron.yaml
-  - grpo_sudoku6x6_base.yaml
+  - ar_grpo_sudoku6x6.yaml
   - compare_nd3b_common_val_t1.yaml
 policy:
   train_micro_batch_size: 4

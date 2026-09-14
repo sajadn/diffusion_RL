@@ -1,6 +1,6 @@
 # math500, block_justgrpo: rollout T=1.0; AR and confidence-0.9 validation T=1.
 defaults:
-  - deepscaler_nemotron_labs_diffusion_3b_sglang_block_just_grpo_megatron.yaml
+  - deepscaler_nemotron_labs_diffusion_3b_vllm_block_just_grpo_megatron.yaml
   - compare_nd3b_math500_task.yaml
   - compare_nd3b_common_val_t1.yaml
 policy:
@@ -9,9 +9,6 @@ policy:
       hf_overrides:
         architectures: [NemotronLabsDiffusionModel]
       diffusion_config:
-        canvas_length: 16
-        temperature: 1.0
-        selection_policy: leftmost
         max_denoising_steps: 16
         emit_full_blocks: false
         return_reveal_steps: false

@@ -1,7 +1,6 @@
 # sudoku6x6, trace_entropy_k2: rollout T=0.6; AR and confidence-0.9 validation T=1.
 defaults:
-  - deepscaler_nemotron_labs_diffusion_3b_sglang_trace_grpo_megatron.yaml
-  - grpo_sudoku6x6_base.yaml
+  - grpo_sudoku6x6_trace_grpo.yaml
   - compare_nd3b_common_val_t1.yaml
 policy:
   train_micro_batch_size: 4
@@ -12,7 +11,6 @@ policy:
       hf_overrides:
         architectures: [NemotronLabsDiffusionModel]
       diffusion_config:
-        canvas_length: 16
         temperature: 0.6
         selection_policy: entropy
         max_denoising_steps: 8

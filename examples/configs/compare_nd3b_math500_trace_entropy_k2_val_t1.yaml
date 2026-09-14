@@ -10,7 +10,6 @@ policy:
       hf_overrides:
         architectures: [NemotronLabsDiffusionModel]
       diffusion_config:
-        canvas_length: 16
         temperature: 0.6
         selection_policy: entropy
         max_denoising_steps: 8
