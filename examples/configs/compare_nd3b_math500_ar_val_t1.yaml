@@ -1,0 +1,17 @@
+# math500, ar: rollout T=1.0; AR and confidence-0.9 validation T=1.
+defaults:
+  - deepscaler_nemotron_labs_diffusion_3b_sglang_ar_megatron.yaml
+  - compare_nd3b_math500_task.yaml
+  - compare_nd3b_common_val_t1.yaml
+policy:
+  generation:
+    vllm_kwargs:
+      hf_overrides:
+        architectures: [NemotronLabsDiffusionForCausalLM]
+      diffusion_config: null
+checkpointing:
+  checkpoint_dir: results/compare_nd3b_math500_ar_val_t1
+logger:
+  log_dir: logs/compare_nd3b_math500_ar_val_t1
+  wandb:
+    name: compare_nd3b_math500_ar_val_t1

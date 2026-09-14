@@ -1,0 +1,28 @@
+# Clean Hendrycks MATH train split; all 500 held-out MATH-500 problems.
+data:
+  _override_: true
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  max_input_seq_length: 1024
+  train:
+    dataset_name: MATH
+    data_path: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_genai/users/snorouzi/eval_data/math_train/train.jsonl
+  validation:
+    dataset_name: MATH
+    data_path: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_genai/users/snorouzi/eval_data/math500_val/val.jsonl
+    repeat: 1
+  default:
+    prompt_file: examples/prompts/cot.txt
+    system_prompt_file: null
+    processor: math_hf_data_processor
+    env_name: math
+policy:
+  max_total_sequence_length: 5120
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  generation:
+    max_new_tokens: 4096
+grpo:
+  val_batch_size: 100
+  max_val_samples: 500

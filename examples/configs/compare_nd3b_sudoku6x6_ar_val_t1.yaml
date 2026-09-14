@@ -1,0 +1,22 @@
+# sudoku6x6, ar: rollout T=1.0; AR and confidence-0.9 validation T=1.
+defaults:
+  - deepscaler_nemotron_labs_diffusion_3b_sglang_ar_megatron.yaml
+  - grpo_sudoku6x6_base.yaml
+  - compare_nd3b_common_val_t1.yaml
+policy:
+  train_micro_batch_size: 4
+  logprob_batch_size: 4
+  generation:
+    vllm_kwargs:
+      hf_overrides:
+        architectures: [NemotronLabsDiffusionForCausalLM]
+      diffusion_config: null
+grpo:
+  val_batch_size: 128
+  max_val_samples: 1024
+checkpointing:
+  checkpoint_dir: results/compare_nd3b_sudoku6x6_ar_val_t1
+logger:
+  log_dir: logs/compare_nd3b_sudoku6x6_ar_val_t1
+  wandb:
+    name: compare_nd3b_sudoku6x6_ar_val_t1
