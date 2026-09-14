@@ -40,32 +40,10 @@ defaults: "ar_v30_ns_prod_10t6g.yaml"
 cluster:
   num_nodes: 16          # 8 train + 8 generation
 
-# --------------------------------------------------------------------------
-# REAPER MITIGATION: first-batch size cut 120 -> 64 prompt groups.
-#
-# The idle-GPU reaper kills any job with GPUs idle 30 min, and the training
-# nodes are idle until step 0 has EVERY group. At the measured ~9.3 groups/min
-# that is ~13 min of fill + ~6 min startup = ~19 min, with no margin -- and
-# 4 of the last 7 legs were reaped before their first optimizer step
-# (38-64 GPUs idle, 30:01-30:41 elapsed, zero steps trained).
-# Response length has also grown ~10% (7450 -> 8184 tok) as training proceeds,
-# eating what margin remained.
-#
-# 64 groups -> ~7 min fill + ~6 min startup = ~13 min, half the deadline.
-# Cost: batch 1920 -> 1024 (47% smaller). Worth it because the advantage fix
-# (76a7df39b) made ~33% of groups signal-carrying, so a 1024 batch trains --
-# whereas a 1920 batch that never reaches an optimizer step does not.
-# NOTE: mean reward is per-trajectory, so the reward curve stays comparable
-# across the change; only gradient noise per step differs.
-# REVERT: set these back to 120 / 1920 if a reaper exemption is granted.
-# --------------------------------------------------------------------------
-grpo:
-  num_prompts_per_step: 64
-
 policy:
   # 120 x 16 = 1920 unchanged; dp 10 -> 8 means 240 per rank (was 192).
   # train_micro_batch_size stays 1, so this is 240 grad-accumulation steps per rank.
-  train_global_batch_size: 1024   # 64 x 16; dp 8 -> 128 per rank
+  train_global_batch_size: 1920
   generation:
     # vLLM engine telemetry, for diagnosing generation hangs. The async worker passes
     # stat_loggers=[] unless this is on (vllm_worker_async.py:179), which suppresses
