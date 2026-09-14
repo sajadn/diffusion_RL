@@ -45,6 +45,17 @@ policy:
   # train_micro_batch_size stays 1, so this is 240 grad-accumulation steps per rank.
   train_global_batch_size: 1920
   generation:
+    # vLLM engine telemetry, for diagnosing generation hangs. The async worker passes
+    # stat_loggers=[] unless this is on (vllm_worker_async.py:179), which suppresses
+    # vLLM's default logging stat logger -- so a wedged engine looks identical to an
+    # idle one. Job 18571461 froze with 103/120 prompt groups pending for 24 min and
+    # all 16 sandboxes silent; without these counters there was no way to tell whether
+    # the engines were generating slowly or not at all.
+    # Samples inflight_batch_sizes / num_pending_samples / kv_cache_usage_perc /
+    # generation_tokens on the model-owner actor. Interval is asserted, not defaulted.
+    vllm_cfg:
+      enable_vllm_metrics_logger: true
+      vllm_metrics_logger_interval: 5.0
     colocated:
       resources:
         num_nodes: 8     # was 6
