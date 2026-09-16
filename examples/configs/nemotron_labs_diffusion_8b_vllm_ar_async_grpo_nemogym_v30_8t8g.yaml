@@ -1,0 +1,146 @@
+# AR GRPO on the FULL v30 deterministic split (14 no-model-judge agents, 13 Gym
+# resource servers + tool calling), 8B v1.5-sft, 48K sequence, vLLM + async-GRPO.
+# 16 nodes = 8 training + 8 generation.
+#
+# Inherits the BlockJustGRPO-Fast v30 config so the whole Gym surface is reused
+# unchanged: all 13 resource servers, the step3p5 tool parser + enable_auto_tools, the
+# v30_deterministic train/val split, 48K budget, gym venv/cache redirection. Only the
+# POLICY becomes autoregressive, plus the two things that forces (CP and entropy).
+#
+# AR CONVERSION -- same four keys as the mcqa_rg and math_16k AR configs:
+#   worker_cls_fqn -> NemotronDiffusionMegatronPolicyWorker
+#   diffusion_config -> null   (also drops the parent's ENGINE-side return_entropy)
+#   hf_overrides.architectures -> [NemotronLabsDiffusionForCausalLM]
+#   vllm_val_dllm_overrides -> null
+# The architectures override is what actually selects AR; without it the engine serves
+# masked-canvas diffusion at temperature 0.0 regardless of the worker. Verify from the
+# run log that NemotronLabsDiffusionForCausalLM appears and canvas_length does not.
+#
+# ############################################################################
+# CONTEXT PARALLEL stays at 2, unpacked -- same shape as the parent.
+#
+# CP is native in this codebase and the unpacked path is GENERIC, not diffusion-only:
+#   - data.py:280-315 zigzag-shards the unpacked sequence per CP rank. The
+#     block-aware (segmented) branch is taken only when block_aware_segments() is
+#     non-None, i.e. the diffusion [noisy|clean] layout; AR falls through to the
+#     standard _get_tokens_on_this_cp_rank zigzag.
+#   - train.py threads get_context_parallel_group() into the post-processors
+#     (213, 393-412, 497), scales the loss by cp_size (423-440) and slices
+#     CP-aware (560-609). All on the shared path.
+# `allow_unpacked_context_parallel` opts into unpacked CP generally; the assert
+# message names the diffusion worker only as its example, not as its precondition.
+#
+# The one real constraint is divisibility: the unpacked branch asserts
+# seq %% (2*cp) == 0. 49152 %% 4 == 0 and make_sequence_length_divisible_by is 8,
+# itself a multiple of 4, so both hold at cp 2.
+# ############################################################################
+#
+# TOPOLOGY 12+3 -> 8+8. The parent is training-bound (block-reveal passes over a 48K
+# canvas). AR is one forward pass per step but strictly sequential decode, so it
+# inverts to generation-bound -- the same inversion measured on mcqa_rg, where AR ran
+# 52% (3B) and 62% (8B) exposed_generation. 1:1 matches the proven 8B AR split.
+#   8 train x 8 GPU = 64, TP 8 x CP 2 -> dp 4; GBS 1920 = 4 x 480; 480 / mb 2 = 240.
+#
+# return_entropy false (PROXY side; the engine side goes with diffusion_config null).
+# The per-token entropy channel exists for JustGRPO-Fast entropy sparsification. AR
+# does not consume it, and leaving it on makes the proxy request top_logprobs=2 and
+# read an entropy slot the AR path never fills.
+#
+# max_num_steps 50 -> 300: the parent was a deliberately short prod run. Three 4h legs
+# need headroom. This is a FRESH run, so all legs share this cap from step 0 and no
+# scheduler override is needed (unlike the mcqa_rg _cont configs).
+#
+# Submit: NODES=16, ENV_TAG=mb_3rdparty_vllm_local_fork_fixed,
+#   NRL_VLLM_PY_EXECUTABLE=.../nemotron_dllm_792ab07/bin/python-compat
+#   RUN_SCRIPT=examples/nemo_gym/run_grpo_nemo_gym.py, UV_EXTRAS="mcore nemo_gym",
+#   NEMO_GYM_VENV_DIR=.../gym_venvs
+defaults: "nemotron_labs_diffusion_8b_vllm_block_just_grpo_async_grpo_nemogym_v30.yaml"
+
+cluster:
+  num_nodes: 16                      # 8 training + 8 generation
+
+grpo:
+  max_num_steps: 300                 # parent was 50 (short prod run)
+  num_generations_per_prompt: 16     # parent was 8
+  num_prompts_per_step: 120          # unchanged -> GBS must follow to 120 x 16
+
+policy:
+  worker_cls_fqn: "nemo_rl.models.policy.workers.nemotron_diffusion_megatron_policy_worker.NemotronDiffusionMegatronPolicyWorker"
+
+  # 120 prompts x 16 generations. train_global_batch_size must equal that product.
+  # dp 4 -> 480 per rank; 480 / mb 2 = 240 microbatches.
+  train_global_batch_size: 1920      # parent was 960 (120 x 8)
+
+  # TP >= 4 requires train_micro_batch_size == logprob_batch_size (lm_policy.py:170).
+  # Both are already 2 in the parent; restated so the constraint is visible here.
+  train_micro_batch_size: 2
+  logprob_batch_size: 2
+
+  # AR consumes no entropy channel, so the parent's JustGRPO-Fast sparsification
+  # ratio must be cleared too, not just the two return_entropy flags. Left at 0.25
+  # it trips the guard in block_just_grpo_logprobs.py:124 ("fast_entropy_level_ratio
+  # is set but the ... generation returned no per-token entropy") before step 1.
+  logprob_estimation:
+    fast_entropy_level_ratio: null
+
+  # TP x CP, NOT TP. The embedding reduce-scatters along the sequence dim for
+  # sequence parallelism, and its input is ALREADY CP-sharded, so the per-rank
+  # length is padded_seq / CP and THAT must divide by TP:
+  #   padded_seq % (TP * CP) == 0  ->  8 * 2 = 16
+  # The AR base inherits ${policy.megatron_cfg.tensor_model_parallel_size} = 8,
+  # which only guarantees 8-alignment and trips mappings.py:173 in get_logprobs.
+  # BlockJustGRPO never hits this: its block-aware CP path pads to
+  # block_size_tokens (256) boundaries, already a multiple of 16. AR falls
+  # through to the generic zigzag shard with 8-alignment only.
+  make_sequence_length_divisible_by: 16
+
+  megatron_cfg:
+    tensor_model_parallel_size: 8
+    # CP 1, NOT 2. The generic logprob post-processor only threads
+    # cp_group into the SEQUENCE-PACKED branch (train.py:497); the unpacked
+    # branch calls from_parallel_logits_to_logprobs with a full-length target
+    # against CP-sharded logits -> gather shape mismatch at model_utils.py:138.
+    # BlockJustGRPO avoids it via its own block-reveal logprob path; AR cannot.
+    # CP 2 was chosen assuming a 49152 padded sequence; the measured padded
+    # length is 23424, so CP 1 is comfortable, and it raises dp from 4 to 8.
+    context_parallel_size: 1
+    allow_unpacked_context_parallel: true
+    sequence_parallel: true
+    activation_checkpointing: true
+
+  generation:
+    colocated:
+      resources:
+        gpus_per_node: 8
+        # MEASURED (5-step probes, 2026-08-12, jobs 15642555/61/70): the run is
+        # TRAINING-bound, not generation-bound. exposed_generation was ~1-2 s of a
+        # 400-700 s step at every split tried, even at 6 gen nodes. Train side
+        # scales linearly (train-node-seconds ~4100 flat), so nodes moved to
+        # training pay off in full:
+        #   8 train + 8 gen -> 546 s/step
+        #  10 train + 6 gen -> 415 s/step   <-- chosen, 31% faster
+        #   6 train + 10 gen -> 686 s/step
+        # 12+4 was NOT chosen: it needs 1.79x the generation capacity actually
+        # demonstrated, risking a >=622 s gen-bound step to gain ~68 s.
+        num_nodes: 6                      # 10 training + 6 generation
+    vllm_kwargs:
+      diffusion_config: null              # AR decoding; also drops engine-side return_entropy
+      hf_overrides:
+        architectures: ["NemotronLabsDiffusionForCausalLM"]
+    vllm_val_dllm_overrides: null         # no diffusion sampler to reconfigure
+
+env:
+  nemo_gym:
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          return_entropy: false           # JustGRPO-Fast channel; AR does not use it
+
+checkpointing:
+  checkpoint_dir: "results/grpo-nd8b-ar-nemogym-v30-vllm-async-grpo-8t8g"
+
+logger:
+  log_dir: "logs/grpo-nd8b-ar-nemogym-v30-vllm-async-grpo-8t8g"
+  wandb:
+    project: "diffusion_rl"
+    name: "nd8b_vllm_ar_async_grpo_nemogym_v30_8t8g"

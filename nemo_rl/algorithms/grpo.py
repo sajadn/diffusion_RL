@@ -4376,6 +4376,7 @@ def async_grpo_train(
         import traceback
 
         traceback.print_exc()
+        raise
 
     finally:
         # Clean up
@@ -4390,4 +4391,4 @@ def async_grpo_train(
         except Exception as e:
             print(f"Error stopping replay buffer: {e}")
 
-        print("Async GRPO training complete!")
+        print("Async GRPO cleanup complete!")

@@ -49,8 +49,17 @@ class ReplayBuffer:
         self.trajectory_versions = []  # it is the weight-version used for generation of a trajectory
         self.target_weight_versions = []  # it is the weight-version of the trainer where this trajectory will be used.
 
+        self._worker_error: Optional[str] = None
         self.last_target_weight_already_generated = -1
         self._lock = _threading.Lock()
+
+    def report_worker_error(self, message: str) -> None:
+        """Make a failed rollout visible to the trainer instead of losing its group."""
+        self._worker_error = message
+
+    def _raise_worker_error(self) -> None:
+        if self._worker_error is not None:
+            raise RuntimeError(self._worker_error)
 
     def push_with_wait_signal(
         self,
@@ -115,6 +124,7 @@ class ReplayBuffer:
         Returns:
             Dictionary with 'trajectories' and 'avg_trajectory_age' keys, or None if insufficient data
         """
+        self._raise_worker_error()
         with self._lock:
             if not self.trajectories:
                 return None
@@ -224,6 +234,7 @@ class ReplayBuffer:
 
     def size(self) -> int:
         """Return current buffer size."""
+        self._raise_worker_error()
         with self._lock:
             return len(self.trajectories)
 
@@ -291,6 +302,8 @@ class AsyncTrajectoryCollector:
         # Track threads
         self._inflight_threads: set[_threading.Thread] = set()
         self._threads_lock: _threading.Lock = _threading.Lock()
+        self._worker_error: Optional[str] = None
+        self._pending_groups: dict[int, dict[str, Any]] = {}
 
         # Limit in-flight generator requests to num_prompts_per_step * max_trajectory_age_steps
         # This value limits the parallelism of the generation requests.
@@ -428,7 +441,10 @@ class AsyncTrajectoryCollector:
                     # Check if generation limits require pausing collection
                     if self._should_pause_for_generation_limits() and self.running:
                         # Only log warning once per weight version
-                        if self._last_limit_warning_version != self.current_weight_version:
+                        if (
+                            self._last_limit_warning_version
+                            != self.current_weight_version
+                        ):
                             async_cfg = self.master_config.get("grpo", {}).get(
                                 "async_grpo", {}
                             )
@@ -442,7 +458,9 @@ class AsyncTrajectoryCollector:
                                 f"⏸️ Pausing collection: all target weights {target_weights} for weight version {self.current_weight_version} "
                                 f"already exist in buffer. Waiting for weight update..."
                             )
-                            self._last_limit_warning_version = self.current_weight_version
+                            self._last_limit_warning_version = (
+                                self.current_weight_version
+                            )
 
                             self._generation_limit_cleared.clear()  # Clear the event to pause
 
@@ -624,7 +642,7 @@ class AsyncTrajectoryCollector:
         allowing ongoing generations to continue with their current KV caches while
         weights are updated. This significantly improves async performance.
 
-        For non-async engines, waits for all pending generations to complete before refit.
+        Otherwise, waits for all pending generations to complete before refit.
         """
         start_time = time.time()
         print("🔄 Preparing for refit: pausing new generations...")
@@ -657,9 +675,9 @@ class AsyncTrajectoryCollector:
                 f"   {len(self._inflight_threads)} ongoing generations will complete with current weights"
             )
         else:
-            # For non-async engines, wait for all pending generations to complete
+            # Without in-flight updates, drain every pending generation before refit.
             print(
-                "⏸️ Non-async engine: waiting for all pending generations to complete..."
+                "⏸️ In-flight updates disabled or unavailable: draining pending generations..."
             )
             self.wait_for_pending_generations()
 
@@ -693,9 +711,16 @@ class AsyncTrajectoryCollector:
 
     def wait_for_pending_generations(self) -> None:
         """Wait for all in-flight generation threads to complete."""
-        start_time = time.time()
+        start_time = time.monotonic()
+        last_progress = start_time
+        previous_count = None
+        timeout = self.master_config["grpo"]["async_grpo"].get(
+            "drain_no_progress_timeout_s", 0
+        )
 
         while True:
+            if self._worker_error is not None:
+                raise RuntimeError(self._worker_error)
             with self._threads_lock:
                 finished = {t for t in self._inflight_threads if not t.is_alive()}
                 for t in finished:
@@ -704,10 +729,27 @@ class AsyncTrajectoryCollector:
                 pending_count = len(self._inflight_threads)
 
             if pending_count == 0:
+                # A worker may have failed between the loop's first check and
+                # removal of its thread from the pending set.
+                if self._worker_error is not None:
+                    raise RuntimeError(self._worker_error)
                 print("✅ All generation threads completed")
                 break
 
-            elapsed = time.time() - start_time
+            now = time.monotonic()
+            if previous_count is None or pending_count < previous_count:
+                last_progress = now
+            previous_count = pending_count
+            if timeout and now - last_progress >= timeout:
+                import faulthandler
+
+                faulthandler.dump_traceback()
+                with self._threads_lock:
+                    pending = list(self._pending_groups.values())
+                raise TimeoutError(
+                    f"Rollout drain made no progress for {timeout}s; pending groups: {pending}"
+                )
+            elapsed = now - start_time
             print(
                 f"⏳ Waiting for {pending_count} pending generation threads... ({elapsed:.1f}s elapsed)"
             )
@@ -744,6 +786,14 @@ class AsyncTrajectoryCollector:
         target_weight_version: int,
         prompt_idx: int,
     ) -> None:
+        current_thread_id = _threading.get_ident()
+        with self._threads_lock:
+            self._pending_groups[current_thread_id] = {
+                "prompt_idx": prompt_idx,
+                "generation_weight_version": generation_weight_version,
+                "target_weight_version": target_weight_version,
+                "started_at": time.time(),
+            }
         try:
             # Import here to avoid circular dependency
             from nemo_rl.algorithms.grpo import _should_use_nemo_gym
@@ -826,11 +876,15 @@ class AsyncTrajectoryCollector:
                         time.sleep(0.01)
             except Exception as e:
                 print(f"❌ Failed to enqueue per-prompt group to buffer: {e}")
+                self._worker_error = f"Rollout group {prompt_idx}, target {target_weight_version} failed: {e}"
+                self.replay_buffer.report_worker_error.remote(self._worker_error)
                 import traceback
 
                 traceback.print_exc()
         except Exception as e:
             print(f"❌ Error in prompt group worker: {e}")
+            self._worker_error = f"Rollout group {prompt_idx}, target {target_weight_version} failed: {e}"
+            self.replay_buffer.report_worker_error.remote(self._worker_error)
             import traceback
 
             traceback.print_exc()
@@ -845,6 +899,7 @@ class AsyncTrajectoryCollector:
 
             # Detach thread record when finished
             with self._threads_lock:
+                self._pending_groups.pop(current_thread_id, None)
                 current = _threading.current_thread()
                 if current in self._inflight_threads:
                     self._inflight_threads.remove(current)

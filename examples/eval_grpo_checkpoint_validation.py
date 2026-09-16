@@ -111,6 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=32)
     parser.add_argument("--threshold", type=float, default=0.9)
     parser.add_argument("--selection-policy", default="confidence")
+    parser.add_argument("--entropy-bound", type=float, default=0.1)
     parser.add_argument("--causal-context", default="true")
     parser.add_argument(
         "--enable-thinking",
@@ -122,6 +123,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--thinking-budget",
+        type=int,
+        default=0,
+        help=(
+            "Cap reasoning at N tokens (vLLM backend only; 0 disables). Enforced by the "
+            "engine via SamplingParams.thinking_token_budget, which needs the server "
+            "started with --reasoning-config. SGLang cannot do this: its "
+            "ThinkingBudgetLogitProcessor runs in layers/sampler.py and FastDiffuser "
+            "bypasses that Sampler entirely, so the cap would silently do nothing."
+        ),
+    )
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--mem-fraction-static", default="0.55")
     parser.add_argument("--max-running-requests", default="8")
@@ -257,8 +270,10 @@ def write_dllm_config(args: argparse.Namespace) -> Path | None:
     # 'threshold' counts globally-confident positions, which is incompatible with the
     # leftmost selection policy (it reveals positions by index, k=1 per step). Emit it
     # for every other algorithm/policy combination.
-    if not (args.dllm_algorithm == "FastDiffuser" and args.selection_policy == "leftmost"):
+    if not (args.dllm_algorithm == "FastDiffuser" and args.selection_policy in ("leftmost", "entropy_bound")):
         config["threshold"] = args.threshold
+    if args.dllm_algorithm == "FastDiffuser" and args.selection_policy == "entropy_bound":
+        config["entropy_bound"] = args.entropy_bound
     with open(config_path, "w", encoding="utf-8") as f:
         for key, value in config.items():
             f.write(f"{key}: {value}\n")
@@ -305,6 +320,8 @@ def server_command(args: argparse.Namespace, dllm_config: Path | None) -> list[s
             str(args.mem_fraction_static),
             "--enforce-eager",
         ]
+        if args.selection_policy in ("entropy_bound", "entropy_confidence_count") and args.dllm_algorithm != "AR":
+            raise ValueError(f"{args.selection_policy} selection is implemented for the SGLang backend only")
         if args.dllm_algorithm == "AR":
             # Serve the diffusion checkpoint as a plain causal LM via the AR
             # model class (is_diffusion -> False, standard causal decode).
@@ -351,6 +368,17 @@ def server_command(args: argparse.Namespace, dllm_config: Path | None) -> list[s
                 "vLLM backend supports --dllm-algorithm AR or FastDiffuser, "
                 f"got {args.dllm_algorithm}"
             )
+        if args.thinking_budget > 0:
+            # ReasoningConfig derives the reasoning token ids from these strings via the
+            # model tokenizer; without it thinking_token_budget has nothing to enforce
+            # against and is silently ignored. <think>/</think> are single tokens for
+            # this checkpoint (12/13), which the diffusion implementation requires.
+            cmd += [
+                "--reasoning-config",
+                json.dumps(
+                    {"reasoning_start_str": "<think>", "reasoning_end_str": "</think>"}
+                ),
+            ]
         if args.server_random_seed is not None:
             cmd.extend(["--seed", str(args.server_random_seed)])
         return cmd
@@ -542,6 +570,8 @@ def generate_one_chat_completions(
         "max_tokens": max_new_tokens,
         "chat_template_kwargs": {"enable_thinking": args.enable_thinking == "true"},
     }
+    if args.backend == "vllm" and args.thinking_budget > 0:
+        payload["thinking_token_budget"] = args.thinking_budget
     if args.backend != "vllm":
         payload.update(
             {
@@ -556,7 +586,13 @@ def generate_one_chat_completions(
         json=payload,
         timeout=14400,
     )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # The body carries the actual reason (which sampling parameter was rejected,
+        # or that the prompt exceeds max_model_len). raise_for_status() throws it away,
+        # which turns a one-line fix into a guessing game.
+        raise RuntimeError(
+            f"{resp.status_code} from {base_url}/v1/chat/completions: {resp.text[:600]}"
+        )
     result = resp.json()
     choice = result["choices"][0]
     message = choice.get("message") or {}

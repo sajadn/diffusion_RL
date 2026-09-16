@@ -1,0 +1,79 @@
+# AR GRPO on ns_tools: inherit the refreshed model, tool/chat setup and dataset.
+# Production overrides: 8 train + 8 generation nodes, 120 x 16 = 1920 trajectories.
+# Keep the tested learning rate, dual AR/diffusion validation and rollout hang fixes.
+# Requires the Gym launcher and patched sandbox (NEMO_SKILLS_SANDBOX=1);
+# use the existing submit_fix_lr1e6.sh or submit_fix_lr3e7.sh wrappers.
+# CHECKPOINT_DIR selects the run to resume; LOG_DIR controls diagnostic output.
+defaults: ar_v30_ns_refreshed.yaml
+grpo:
+  num_prompts_per_step: 120
+  max_num_steps: 300
+  val_period: 10
+  val_at_end: true
+  async_grpo:
+    drain_no_progress_timeout_s: 900
+checkpointing:
+  enabled: true
+  checkpoint_dir: ${oc.env:CHECKPOINT_DIR,results/ar-grpo-ns}
+  keep_top_k: null
+  # DD:HH:MM:SS; preserve the tested two-hour save/stop timer.
+  checkpoint_must_save_by: "00:02:00:00"
+policy:
+  train_global_batch_size: 1920
+  megatron_cfg:
+    optimizer:
+      lr: 1.0e-06
+      min_lr: 1.0e-07
+  generation:
+    vllm_cfg:
+      enable_vllm_metrics_logger: true
+      vllm_metrics_logger_interval: 5.0
+      diagnostics_dir: ${logger.log_dir}/diagnostics
+    colocated:
+      resources:
+        num_nodes: 8
+    vllm_val_dllm_variants:
+      ar:
+        vllm_kwargs:
+          diffusion_config: null
+          hf_overrides:
+            architectures:
+            - NemotronLabsDiffusionForCausalLM
+      diffusion:
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          diffusion_config:
+            selection_policy: confidence_threshold
+            confidence_threshold: 0.9
+            temperature: 1.0
+          hf_overrides:
+            architectures:
+            - NemotronLabsDiffusionModel
+env:
+  nemo_gym:
+    math_with_judge:
+      resources_servers:
+        math_with_judge:
+          # Keep Math-Verify/SymPy off the HTTP event loop.
+          verifier_workers: 8
+          verifier_timeout_s: 30
+    port_range_low: 2000
+    port_range_high: 5999
+    global_aiohttp_client_timeout_s: 1800
+    rollout_diagnostics_dir: ${logger.log_dir}/diagnostics
+    ns_tools:
+      resources_servers:
+        ns_tools:
+          cleanup_sessions: true
+    ns_tools_simple_agent:
+      responses_api_agents:
+        simple_agent:
+          cleanup_session: true
+          max_steps: 5
+logger:
+  log_dir: ${oc.env:LOG_DIR,logs/ar-grpo-ns}
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,ar_grpo_ns}
+cluster:
+  num_nodes: 16

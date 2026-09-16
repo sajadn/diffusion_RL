@@ -327,4 +327,14 @@ The validation set you pass in will directly be used for validation with no addi
 
 
 if __name__ == "__main__":
-    main()
+    exit_code = 1
+    try:
+        main()
+        exit_code = 0
+    finally:
+        # Stop Ray's background console forwarding before flushing W&B. Relying
+        # on interpreter teardown can close W&B's service before the run finishes.
+        try:
+            ray.shutdown()
+        finally:
+            wandb.finish(exit_code=exit_code)

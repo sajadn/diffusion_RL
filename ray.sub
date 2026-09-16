@@ -435,7 +435,20 @@ done
 if [[ "${NEMO_SKILLS_SANDBOX:-0}" == "1" ]]; then
   SANDBOX_IMAGE=${NEMO_SKILLS_SANDBOX_IMAGE:-/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_genai/nemo-rl/nemo-skills-sandbox.sqsh}
   SANDBOX_PORT=${NEMO_SKILLS_SANDBOX_PORT:-6000}
-  # NO --container-mounts: this sandbox executes model-written code. Upstream runs it
+  SANDBOX_EXTRA_ARGS=()
+  SANDBOX_MOUNTS=""
+  if [[ -n "${NEMO_SKILLS_SANDBOX_SERVER_FILE:-}" ]]; then
+    test -f "$NEMO_SKILLS_SANDBOX_SERVER_FILE"
+    SANDBOX_MOUNTS="$NEMO_SKILLS_SANDBOX_SERVER_FILE:/app/main.py:ro"
+  fi
+  if [[ -n "${NEMO_SKILLS_SANDBOX_LAUNCHER_FILE:-}" ]]; then
+    test -f "$NEMO_SKILLS_SANDBOX_LAUNCHER_FILE"
+    SANDBOX_MOUNTS+="${SANDBOX_MOUNTS:+,}$NEMO_SKILLS_SANDBOX_LAUNCHER_FILE:/start-with-nginx.sh:ro"
+  fi
+  if [[ -n "$SANDBOX_MOUNTS" ]]; then
+    SANDBOX_EXTRA_ARGS+=(--container-mounts="$SANDBOX_MOUNTS")
+  fi
+  # Mount only the optional read-only sandbox patches: this executes model-written code. Upstream runs it
   # with keep_mounts=False ("safer: sandbox has no access to mounted paths"). Mounting
   # $MOUNTS would give generated code read-write access to /home and all of /lustre,
   # including the checkpoint_dir the same job is writing. /start-with-nginx.sh ships in
@@ -446,6 +459,7 @@ if [[ "${NEMO_SKILLS_SANDBOX:-0}" == "1" ]]; then
     srun --overlap --no-container-mount-home \
          --container-name=ns-sandbox-$i \
          --container-image=$SANDBOX_IMAGE \
+         "${SANDBOX_EXTRA_ARGS[@]}" \
          --nodes=1 --ntasks=1 --gpus-per-node=0 -w "$node_i" \
          -o $LOG_DIR/ns-sandbox-$i.log /start-with-nginx.sh &
     SRUN_PIDS["ns-sandbox-$i"]=$!
@@ -514,7 +528,15 @@ echo "All workers connected!"
 # This driver process is responsible for launching a job on the Ray cluster
 CONTAINER_CWD=$(scontrol show job $SLURM_JOB_ID | grep -oP 'WorkDir=\K[^ ]+' | head -1)
 if [[ -n "$COMMAND" ]]; then
-  srun --no-container-mount-home --overlap --container-name=ray-head --container-workdir=$CONTAINER_CWD --nodes=1 --ntasks=1 -w "$head_node" -o $LOG_DIR/ray-driver.log bash -c "$COMMAND"
+  srun --no-container-mount-home --overlap --container-name=ray-head --container-workdir=$CONTAINER_CWD --nodes=1 --ntasks=1 -w "$head_node" -o $LOG_DIR/ray-driver.log bash -c "$COMMAND" &
+  DRIVER_PID=$!
+  # Keep checking sidecars after startup, so training cannot continue with dead
+  # sandbox services and silently turn infrastructure failures into tool output.
+  while kill -0 "$DRIVER_PID" 2>/dev/null; do
+    check_srun_processes
+    sleep 10
+  done
+  wait "$DRIVER_PID"
 else
   echo "[INFO]: Ray Cluster is idled, run this on the slurm head node to get a shell to the head node:"
   cat <<EOF >$SLURM_SUBMIT_DIR/${SLURM_JOB_ID}-attach.sh

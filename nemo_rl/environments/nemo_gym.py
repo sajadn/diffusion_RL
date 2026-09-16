@@ -50,6 +50,13 @@ class NemoGym(EnvironmentInterface):
         initial_global_config_dict = (
             self.cfg.get("initial_global_config_dict") or dict()
         )
+        diagnostics_dir = initial_global_config_dict.pop(
+            "rollout_diagnostics_dir", None
+        )
+        if diagnostics_dir:
+            import os
+
+            os.environ["NRL_GYM_DIAGNOSTICS_DIR"] = diagnostics_dir
         # Policy information
         initial_global_config_dict["policy_model_name"] = self.cfg["model_name"]
         initial_global_config_dict["policy_api_key"] = (

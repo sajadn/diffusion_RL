@@ -234,7 +234,28 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             time.sleep(min(2.0, interval_s))
             while True:
                 try:
-                    for m in get_metrics_snapshot():
+                    metrics_snapshot = get_metrics_snapshot()
+                    diagnostics_dir = self.cfg["vllm_cfg"].get("diagnostics_dir")
+                    if diagnostics_dir:
+                        import json
+                        import os
+                        import socket
+                        from pathlib import Path
+
+                        directory = Path(diagnostics_dir)
+                        directory.mkdir(parents=True, exist_ok=True)
+                        path = (
+                            directory
+                            / f"vllm-{socket.gethostname()}-{os.getpid()}.json"
+                        )
+                        snapshot = {}
+                        for metric in metrics_snapshot:
+                            if isinstance(metric, (Gauge, Counter)):
+                                snapshot[metric.name] = snapshot.get(metric.name, 0) + metric.value
+                        path.write_text(
+                            json.dumps({"time": time.time(), "metrics": snapshot})
+                        )
+                    for m in metrics_snapshot:
                         with self._vllm_metrics_lock:
                             if isinstance(m, Gauge):
                                 # Log the vllm inflight batch sizes
