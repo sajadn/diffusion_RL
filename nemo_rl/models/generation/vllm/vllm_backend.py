@@ -144,6 +144,7 @@ class VllmInternalWorkerExtension:
         "low_confidence",
         "leftmost",
         "random",
+        "entropy",
         "confidence_threshold",
     )
 
@@ -154,6 +155,7 @@ class VllmInternalWorkerExtension:
     _DLLM_POLICY_FLAGS = {
         "leftmost": "leftmost",
         "random": "random_mode",
+        "entropy": "entropy_mode",
         "confidence_threshold": "threshold_mode",
     }
 

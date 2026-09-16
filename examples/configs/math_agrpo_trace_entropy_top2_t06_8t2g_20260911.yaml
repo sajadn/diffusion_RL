@@ -1,0 +1,25 @@
+# Fresh MATH Trace-GRPO run: fixed-two entropy at T=0.6 for train AND validation.
+# Same signed objective and 8 train + 2 generation topology as the T=1 run.
+defaults: "math_agrpo_trace_entropy_top2_t1_8t2g_20260910.yaml"
+
+policy:
+  generation:
+    temperature: 0.6
+    vllm_kwargs:
+      diffusion_config:
+        selection_policy: "entropy"
+        temperature: 0.6
+        canvas_length: 16
+        max_denoising_steps: 8
+        confidence_threshold: null
+    # Validation uses the rollout decoder unchanged: same positions, T and steps.
+    # Clear inherited confidence overrides; no live sampler switch is needed.
+    sglang_val_dllm_overrides: null
+    vllm_val_dllm_overrides: null
+
+checkpointing:
+  checkpoint_dir: "results/math_agrpo_trace_entropy_top2_t06_8t2g_20260911"
+logger:
+  log_dir: "logs/math_agrpo_trace_entropy_top2_t06_8t2g_20260911"
+  wandb:
+    name: "math_agrpo_trace_entropy_top2_t06_8t2g_20260911"

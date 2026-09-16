@@ -1,0 +1,322 @@
+diff --git a/vllm/config/diffusion.py b/vllm/config/diffusion.py
+--- a/vllm/config/diffusion.py
++++ b/vllm/config/diffusion.py
+@@ -35,7 +35,10 @@
+     greedy for masked-diffusion models."""
+
+     selection_policy: (
+-        Literal["low_confidence", "leftmost", "confidence_threshold", "random"]
++        Literal[
++            "low_confidence", "leftmost", "confidence_threshold", "random", "entropy",
++            "entropy_budget"
++        ]
+         | None
+     ) = None
+     """Which masked positions to unmask each denoising step (masked-diffusion
+@@ -43,6 +46,9 @@
+     top-k per step with k from the even transfer schedule
+     (``ceil(masks / remaining_steps)``), so tokens-per-forward is fixed at
+     ``canvas_length / max_denoising_steps``.
++    ``entropy``: reveal the lowest-entropy positions under the temperature-scaled
++    token distribution, using the same even transfer schedule. Position scores
++    do not depend on sampled candidate identities.
+     ``leftmost``: strictly left-to-right — with one token per step this yields
+     clean per-token policy logprobs matching a leftmost-reveal RL recompute.
+     ``random``: uniform random reveal order among the still-masked positions,
+@@ -57,6 +63,12 @@
+     Megatron-Bridge thresholding decode.
+     If not set, read from the model's generation_config.json
+     (``diffusion_selection_policy``), defaulting to ``low_confidence``."""
++
++    entropy_bound: float = Field(default=0.1, ge=0)
++    """For ``entropy_budget``, select the largest lowest-entropy prefix with
++    sum(entropies) - max(entropy) <= this budget in nats. At least one valid
++    masked position is selected. Entropies use the sampling temperature.
++    Adapts the Gemma entropy-bound rule to absorbing masked diffusion."""
+
+     confidence_threshold: float | None = Field(default=None, gt=0, lt=1)
+     """Probability bar a masked position must clear to be unmasked under
+diff --git a/vllm/model_executor/models/nemotron_dllm.py b/vllm/model_executor/models/nemotron_dllm.py
+--- a/vllm/model_executor/models/nemotron_dllm.py
++++ b/vllm/model_executor/models/nemotron_dllm.py
+@@ -356,9 +356,12 @@
+     random_mode: bool,
+     threshold_mode: bool,
+     log_threshold: float,
++    entropy_mode: bool = False,
++    entropy_budget_mode: bool = False,
++    entropy_bound: float = 0.1,
+ ) -> torch.Tensor:
+     """Compiled masked-diffusion step (low-confidence, leftmost, or
+-    confidence-threshold selection, absorbing state).
++    confidence-threshold or entropy selection, absorbing state).
+
+     Per denoise step: x0 over the whole canvas — greedy argmax when
+     ``temperature == 0``, otherwise sampled from ``softmax(logits / T)``
+@@ -376,9 +379,10 @@
+     plus always the single most confident one so each step makes progress
+     (worst case degrades to one-token-per-step and the ``canvas_length``
+     default step budget still terminates). Unmasked positions are never
+-    re-masked. A request converges when no masks remain or the step budget
+-    is reached; the next step commits the block (causal, writes KV) and
+-    resets the canvas to masks.
++    re-masked. With ``entropy_mode``, top-k ranks by negative distribution
++    entropy instead of the sampled candidate probability. A request converges
++    when no masks remain or the step budget is reached; the next step commits
++    the block (causal, writes KV) and resets the canvas to masks.
+
+     When ``capture_logprobs``, the chosen token's logprob and rank under
+     the sampling distribution ``softmax(logits / max(T, 1))`` are written
+@@ -429,6 +433,16 @@
+     x0_logprob = log_probs.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
+     neg_inf = torch.full_like(x0_logprob, float("-inf"))
+     confidence = torch.where(mask_index, x0_logprob, neg_inf)
++
++    if entropy_mode or entropy_budget_mode:
++        entropy_lp = (
++            (logits_3d / temperature).log_softmax(dim=-1)
++            if temperature > 0 and temperature != 1.0
++            else log_probs
++        )
++        finite_lp = torch.where(torch.isfinite(entropy_lp), entropy_lp, 0.0)
++        neg_entropy = (entropy_lp.exp() * finite_lp).sum(dim=-1)
++        confidence = torch.where(mask_index, neg_entropy, neg_inf)
+
+     # ---- Even transfer schedule: k = ceil(#masks / remaining steps) ----
+     num_masks = mask_index.sum(dim=-1)  # [num_decode] int64
+@@ -452,6 +466,19 @@
+         ranks = torch.empty_like(order)
+         ranks.scatter_(1, order, pos.expand(num_decode, CL))
+         transfer = mask_index & (ranks < k.unsqueeze(1))
++    elif entropy_budget_mode:
++        # Gemma entropy bound: sum(H_selected) - max(H_selected) <= bound.
++        # Sorting by H makes this the exclusive prefix sum. Invalid/revealed
++        # positions sort last and are gated out; avoid inf - inf for empty rows.
++        order = torch.argsort(confidence, dim=-1, descending=True, stable=True)
++        sorted_valid = mask_index.gather(1, order)
++        sorted_h = torch.where(sorted_valid, -neg_entropy.gather(1, order), 0.0)
++        preceding_h = torch.cat(
++            (torch.zeros_like(sorted_h[:, :1]), sorted_h[:, :-1].cumsum(-1)),
++            dim=-1,
++        )
++        accept = sorted_valid & (preceding_h <= entropy_bound)
++        transfer = torch.zeros_like(mask_index).scatter_(1, order, accept)
+     elif threshold_mode:
+         # FastDiffuser thresholding: unmask every masked position whose
+         # chosen-token logprob clears the threshold, and always the single
+@@ -682,11 +709,16 @@
+             "leftmost",
+             "confidence_threshold",
+             "random",
++            "entropy",
++            "entropy_budget",
+         ):
+             raise ValueError(
+                 f"Unknown diffusion selection_policy: {selection!r}"
+             )
+         self.selection_policy = selection
++        self.entropy_bound = (
++            diffusion_config.entropy_bound if diffusion_config else 0.1
++        )
+         # Probability threshold for selection_policy="confidence_threshold"
+         # (SGLang FastDiffuser thresholding). None-checks rather than `or`
+         # so an explicit small value is honored.
+@@ -751,6 +783,7 @@
+             temperature=self.sampling_temperature,
+             selection_policy=self.selection_policy,
+             confidence_threshold=self.confidence_threshold,
++            entropy_bound=self.entropy_bound,
+             return_entropy=self.return_entropy,
+             return_reveal_steps=self.return_reveal_steps,
+         ), None
+@@ -875,7 +908,8 @@
+     reveal for leftmost-reveal RL rollouts), ``random`` (uniform random reveal
+     order, unbiased policy logprobs), or ``confidence_threshold``
+     (SGLang FastDiffuser thresholding: every position whose chosen-token
+-    probability exceeds ``confidence_threshold``, at least one per step).
++    probability exceeds ``confidence_threshold``, at least one per step), or
++    ``entropy`` (lowest distribution entropy first, with the even schedule).
+
+     With ``return_entropy`` (``DiffusionConfig.return_entropy`` or the
+     ``diffusion_return_entropy`` generation-config key), commits emit the
+@@ -911,6 +945,7 @@
+         confidence_threshold: float = 0.9,
+         return_entropy: bool = False,
+         return_reveal_steps: bool = False,
++        entropy_bound: float = 0.1,
+     ):
+         self.sampling_states = sampler.sampling_states
+         self.req_states = sampler.req_states
+@@ -921,6 +956,9 @@
+         self.temperature = temperature
+         self.leftmost = selection_policy == "leftmost"
+         self.random_mode = selection_policy == "random"
++        self.entropy_mode = selection_policy == "entropy"
++        self.entropy_budget_mode = selection_policy == "entropy_budget"
++        self.entropy_bound = float(entropy_bound)
+         self.threshold_mode = selection_policy == "confidence_threshold"
+         # Compared against per-position chosen-token logprobs (natural log).
+         self.log_threshold = math.log(confidence_threshold)
+@@ -1234,6 +1272,9 @@
+             random_mode=self.random_mode,
+             threshold_mode=self.threshold_mode,
+             log_threshold=self.log_threshold,
++            entropy_mode=self.entropy_mode,
++            entropy_budget_mode=self.entropy_budget_mode,
++            entropy_bound=self.entropy_bound,
+         )
+
+         # TPF accounting (tensor ops only -- no host sync). Rows that were
+diff --git a/tests/models/language/generation/test_nemotron_dllm.py b/tests/models/language/generation/test_nemotron_dllm.py
+--- a/tests/models/language/generation/test_nemotron_dllm.py
++++ b/tests/models/language/generation/test_nemotron_dllm.py
+@@ -96,6 +96,73 @@
+     assert DiffusionConfig(canvas_length=32, temperature=1.0).temperature == 1.0
+     with pytest.raises(Exception):
+         DiffusionConfig(canvas_length=32, temperature=-0.5)
++
++
++@requires_gpu
++def test_entropy_selection_preserves_low_probability_candidates():
++    """Rank distributions independently of draws; preserve sampled-token logprobs."""
++    from vllm.model_executor.models.nemotron_dllm import _compiled_masked_step
++
++    device = "cuda"
++    batch, width, vocab, mask_id = 2048, 4, 5, 4
++    probs = torch.tensor(
++        [[0.9, 0.1], [0.8, 0.2], [0.7, 0.3], [0.999, 0.001]], device=device
++    )
++    logits = torch.full((batch, width, vocab), -80.0, device=device)
++    logits[:, :, :2] = probs.log()
++    slots = torch.arange(batch, device=device)
++
++    def run(entropy_mode, temperature=1.0, steps=2):
++        canvas = torch.full((batch, width), mask_id, device=device, dtype=torch.int64)
++        step = torch.zeros(batch, device=device, dtype=torch.int32)
++        phase = torch.zeros(batch, device=device, dtype=torch.bool)
++        lp = torch.zeros(batch, width, device=device)
++        rank = torch.zeros_like(canvas, dtype=torch.int32)
++        ent = torch.zeros_like(lp)
++        reveal = torch.full_like(rank, -1)
++        sampled = torch.zeros_like(rank)
++        count = torch.zeros_like(step)
++        draft = torch.zeros_like(canvas)
++        output_reveal = torch.zeros_like(rank)
++        for _ in range(steps):
++            _compiled_masked_step(
++                logits.reshape(-1, vocab), slots, slots, slots,
++                torch.full_like(slots, 3), torch.ones(batch, device=device),
++                canvas, step, phase, lp, rank, ent, reveal,
++                sampled, count, draft, output_reveal,
++                max_denoising_steps=2, mask_token_id=mask_id, CL=width,
++                temperature=temperature, capture_logprobs=True,
++                capture_entropy=True, capture_steps=True, leftmost=False,
++                random_mode=False, threshold_mode=False,
++                log_threshold=math.log(0.9), entropy_mode=entropy_mode,
++            )
++        return canvas, lp, reveal
++
++    torch.manual_seed(192)
++    canvas, lp, reveal = run(True, steps=1)
++    assert (canvas[:, :2] != mask_id).all()
++    assert (canvas[:, 2:] == mask_id).all()  # third masked; fourth is invalid padding
++    for pos, expected in [(0, 0.1), (1, 0.2)]:
++        fraction = (canvas[:, pos] == 1).float().mean().item()
++        assert abs(fraction - expected) < 0.035
++    expected_lp = probs[:2].log().expand(batch, -1, -1).gather(
++        -1, canvas[:, :2].unsqueeze(-1)
++    ).squeeze(-1)
++    torch.testing.assert_close(lp[:, :2], expected_lp)
++    assert (reveal[:, :2] == 0).all()
++    assert (reveal[:, 2:] == -1).all()
++
++    torch.manual_seed(192)
++    confidence_canvas, _, _ = run(False, steps=1)
++    assert (confidence_canvas[:, 2] != mask_id).any()
++    assert (confidence_canvas[:, :3] != mask_id).sum(1).eq(2).all()
++
++    for temperature in (0.0, 0.6, 1.0):
++        canvas, _, reveal = run(True, temperature=temperature)
++        assert (canvas[:, :3] != mask_id).all()
++        assert (canvas[:, 3] == mask_id).all()
++        assert (reveal[:, :2] == 0).all()
++        assert (reveal[:, 2] == 1).all()
+
+
+ # ---------------------------------------------------------------------------
+@@ -813,3 +880,75 @@
+     )
+     assert stopped_len % CANVAS_LENGTH == 0
+     assert stopped_len > stop_index, "emit_full_blocks did not extend the output"
++
++
++@requires_gpu
++def test_entropy_budget_selection():
++    """Gemma prefix bound, absorbing/padding masks, sampling and temperature."""
++    from vllm.model_executor.models.nemotron_dllm import _compiled_masked_step
++
++    device = "cuda"
++    batch, width, vocab, mask_id = 2048, 6, 3, 2
++    # Position 4 is already revealed; position 5 is padding. Both very certain.
++    probs = torch.tensor([.999, .99, .95, .5, .9999, .99999], device=device)
++    logits = torch.stack(
++        (probs.log(), (1-probs).log(), torch.full_like(probs, -80)), -1
++    )
++    logits = logits.expand(batch, -1, -1).contiguous()
++    slots = torch.arange(batch, device=device)
++    for temperature in (1.0, 0.6):
++        lp_ref = (logits[0] / temperature).log_softmax(-1)
++        h = -(lp_ref.exp()*lp_ref).sum(-1)
++        for budget in (0.0, 0.1, 10.0):
++            canvas = torch.full(
++                (batch, width), mask_id, device=device, dtype=torch.int64
++            )
++            canvas[:, 4] = 1
++            step = torch.zeros(batch, device=device, dtype=torch.int32)
++            phase = torch.zeros(batch, device=device, dtype=torch.bool)
++            lp = torch.zeros(batch, width, device=device)
++            rank = torch.zeros_like(canvas, dtype=torch.int32)
++            ent = torch.zeros_like(lp)
++            reveal = torch.full_like(rank, -1)
++            sampled = torch.zeros_like(rank)
++            count = torch.zeros_like(step)
++            draft = torch.zeros_like(canvas)
++            output_reveal = torch.zeros_like(rank)
++            torch.manual_seed(783)
++            _compiled_masked_step(
++                logits.reshape(-1, vocab), slots, slots, slots,
++                torch.full_like(slots, 5), torch.ones(batch, device=device),
++                canvas, step, phase, lp, rank, ent, reveal,
++                sampled, count, draft, output_reveal,
++                max_denoising_steps=width, mask_token_id=mask_id, CL=width,
++                temperature=temperature, capture_logprobs=True,
++                capture_entropy=True, capture_steps=True, leftmost=False,
++                random_mode=False, threshold_mode=False, log_threshold=math.log(.9),
++                entropy_budget_mode=True, entropy_bound=budget,
++            )
++            # Independent scalar definition, rather than the vectorized implementation.
++            ordered = sorted(range(4), key=lambda j: float(h[j]))
++            chosen = []
++            for j in ordered:
++                candidate = chosen + [j]
++                hs = [float(h[t]) for t in candidate]
++                if sum(hs) - max(hs) <= budget:
++                    chosen = candidate
++                else:
++                    break
++            expected = torch.zeros(width, device=device, dtype=torch.bool)
++            expected[chosen] = True
++            assert (reveal.eq(0) == expected[None]).all()
++            assert canvas[:, 4].eq(1).all() and canvas[:, 5].eq(mask_id).all()
++            if budget == 0:
++                assert len(chosen) == 1
++            if budget == .1 and temperature == 1:
++                assert len(chosen) == 3  # naive sum(H) would only select two
++            if budget == 10:
++                assert len(chosen) == 4
++            for j in chosen:
++                want = lp_ref[j].gather(0, canvas[:, j])
++                torch.testing.assert_close(lp[:, j], want)
++                torch.testing.assert_close(ent[:, j], h[j].expand(batch))
++                fraction = canvas[:, j].eq(1).float().mean().item()
++                assert abs(fraction - float(lp_ref[j, 1].exp())) < .035

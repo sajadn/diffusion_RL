@@ -1,0 +1,17 @@
+# Sudoku Trace GRPO: fixed-two entropy training at T=0.6.
+# Keep the T=1 parent's confidence-0.9/T=1 validation for matched comparisons.
+defaults: "grpo_sudoku6x6_trace_top2_entropy_t1_20260910.yaml"
+
+policy:
+  generation:
+    temperature: 0.6
+    vllm_kwargs:
+      diffusion_config:
+        temperature: 0.6
+
+checkpointing:
+  checkpoint_dir: "results/grpo_sudoku6x6_trace_top2_entropy_t06_20260916"
+logger:
+  log_dir: "logs/grpo_sudoku6x6_trace_top2_entropy_t06_20260916"
+  wandb:
+    name: "grpo_sudoku6x6_trace_top2_entropy_t06_20260916"

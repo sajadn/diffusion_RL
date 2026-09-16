@@ -1,0 +1,29 @@
+# Sudoku Trace GRPO: fixed-two lowest-entropy positions, categorical tokens at T=1.
+# Inline the original control overrides to depend only on tracked main configs.
+# Validation remains confidence threshold 0.9 at T=1, with 16 steps/block.
+defaults: "grpo_sudoku6x6_trace_grpo_vllm_conf09_t1_fullblocks_tis_async_grpo.yaml"
+
+grpo:
+  max_num_steps: 300
+
+policy:
+  generation:
+    temperature: 1.0
+    vllm_kwargs:
+      diffusion_config:
+        selection_policy: "entropy"
+        temperature: 1.0
+        canvas_length: 16
+        confidence_threshold: null
+        max_denoising_steps: 8
+    vllm_val_dllm_overrides:
+      vllm_kwargs:
+        diffusion_config:
+          max_denoising_steps: 16
+
+checkpointing:
+  checkpoint_dir: "results/grpo_sudoku6x6_trace_top2_entropy_t1_20260910"
+logger:
+  log_dir: "logs/grpo_sudoku6x6_trace_top2_entropy_t1_20260910"
+  wandb:
+    name: "grpo_sudoku6x6_trace_top2_entropy_t1_20260910"
