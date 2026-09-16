@@ -2,7 +2,7 @@
 # Production overrides: 8 train + 8 generation nodes, 120 x 16 = 1920 trajectories.
 # Keep the tested learning rate, dual AR/diffusion validation and rollout hang fixes.
 # Requires the Gym launcher and patched sandbox (NEMO_SKILLS_SANDBOX=1);
-# use the existing submit_fix_lr1e6.sh or submit_fix_lr3e7.sh wrappers.
+# see skills/nemotron-experiment-submit/SKILL.md for the four-hour command.
 # CHECKPOINT_DIR selects the run to resume; LOG_DIR controls diagnostic output.
 defaults: ar_v30_ns_refreshed.yaml
 grpo:
@@ -16,8 +16,8 @@ checkpointing:
   enabled: true
   checkpoint_dir: ${oc.env:CHECKPOINT_DIR,results/ar-grpo-ns}
   keep_top_k: null
-  # DD:HH:MM:SS; preserve the tested two-hour save/stop timer.
-  checkpoint_must_save_by: "00:02:00:00"
+  # DD:HH:MM:SS; target a four-hour allocation with margin for saving/shutdown.
+  checkpoint_must_save_by: "00:03:45:00"
 policy:
   train_global_batch_size: 1920
   megatron_cfg:
