@@ -1,0 +1,70 @@
+# DFW presets for one-sample-per-question checkpoint evaluation.
+# Paths and operational defaults are explicit; override with --config or CLI flags.
+cluster:
+  partition: batch_short
+  scoring_partition: cpu_short
+  time: '02:00:00'
+  cpus: 16
+  memory: 128G
+  max_parallel: 2
+  mounts: /home/snorouzi:/home/snorouzi,/lustre:/lustre
+runtime:
+  python: /lustre/fsw/portfolios/coreai/users/snorouzi/nemorl_uv_driver_envs/diffusion_RL_RL_mb_3rdparty_sglagn_local_fork/bin/python
+  scoring_python: /lustre/fsw/portfolios/coreai/users/snorouzi/nemo_skills_host_venv/bin/python
+  vllm_python: /lustre/fsw/portfolios/coreai/users/snorouzi/vllm_runtimes/nemotron_dllm_792ab07/bin/python-compat
+  container: /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_llm/users/sfawzy/nemo-rl-nightly.sqsh
+  scicode_container: /lustre/fsw/portfolios/nvr/users/lwhalen/docker/lxaw_ministral_sft_eval/nemo-rl-lxaw-sft-eval.sqsh
+  hf_home: /lustre/fsw/portfolios/coreai/users/snorouzi/hf_home
+  data_root: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_genai/users/snorouzi/eval_data
+  ifbench_repo: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_genai/users/snorouzi/code/ifbench_src/IFBench-main
+  prompt_file: examples/prompts/passthrough.txt
+  scicode_venv: /opt/nemo_rl_venv
+common:
+  algorithm: FastDiffuser
+  temperature: 0.0
+  block_size: 16
+  max_steps: 8192
+  threshold: 0.9
+  selection_policy: confidence
+  enable_thinking: true
+  thinking_budget: 8192
+  max_new_tokens: 16384
+  context_length: 20480
+  concurrent: 8
+  memory_fraction: 0.75
+  top_p: 1.0
+  top_k: -1
+  seed: 42
+  server_seed: 0
+  num_samples: -1
+benchmarks:
+  ifbench:
+    dataset: ifbench/test.jsonl
+    shards: 1
+  livecodebench:
+    dataset: livecodebench/prompts_v6.jsonl
+    tests: livecodebench/test6.jsonl
+    shards: 1
+    workers: 16
+    per_test_timeout: 6
+    job_timeout: 300
+    mem_limit_mb: 4096
+  scicode:
+    dataset: scicode/test_aai.jsonl
+    shards: 4
+    block_size: 32
+    max_steps: 32
+    context_length: 65536
+    concurrent: 16
+    split: test_aai
+    prompt_config: eval/scicode/background
+    sandbox_timeout: 30.0
+  aa_lcr:
+    dataset: aa_lcr/prompts.jsonl
+    shards: 10
+    thinking_budget: 4096
+    max_new_tokens: 8192
+    context_length: 131072
+    concurrent: 2
+    memory_fraction: 0.85
+    judge: heuristic

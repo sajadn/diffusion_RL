@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """No-Ray math evaluator matching the diffuGRPO validation settings.
 
 This script avoids NeMo-RL's Ray training stack. It reproduces the important
@@ -24,7 +37,6 @@ import json
 import os
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -42,13 +54,12 @@ DEFAULT_VENV = Path(
     "/lustre/fsw/portfolios/coreai/users/snorouzi/"
     "sglang_nemotron_torch291_cu129_uvpy312_venv"
 )
-DEFAULT_PROMPT = Path(
-    __file__
-).resolve().parent / "prompts" / "cot.txt"
+DEFAULT_PROMPT = Path(__file__).resolve().parent / "prompts" / "cot.txt"
 DEFAULT_OUTDIR = Path(
     "/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_genai/users/snorouzi/"
     "eval_results/diffugrpo_step275_gsm8k_training_style_no_ray"
 )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -71,14 +82,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--benchmark",
         default="gsm8k",
-        choices=("gsm8k", "aime24", "aime2024", "aime25", "aime2025", "aime26", "aime2026", "ifbench", "lcb", "livecodebench", "aa_lcr", "aalcr"),
+        choices=(
+            "gsm8k",
+            "aime24",
+            "aime2024",
+            "aime25",
+            "aime2025",
+            "aime26",
+            "aime2026",
+            "ifbench",
+            "lcb",
+            "livecodebench",
+            "aa_lcr",
+            "aalcr",
+        ),
         help="Evaluation benchmark to load.",
     )
     parser.add_argument("--num-samples", type=int, default=-1)
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--launch-server", action="store_true", default=True)
-    parser.add_argument("--no-launch-server", dest="launch_server", action="store_false")
+    parser.add_argument(
+        "--no-launch-server", dest="launch_server", action="store_false"
+    )
     parser.add_argument("--base-url", default="http://127.0.0.1:32000")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=32000)
@@ -106,7 +132,11 @@ def parse_args() -> argparse.Namespace:
         help="SGLang request API to use.",
     )
 
-    parser.add_argument("--dllm-algorithm", default="FastDiffuser", choices=("FastDiffuser", "LinearSpec", "AR"))
+    parser.add_argument(
+        "--dllm-algorithm",
+        default="FastDiffuser",
+        choices=("FastDiffuser", "LinearSpec", "AR"),
+    )
     parser.add_argument("--block-size", type=int, default=32)
     parser.add_argument("--max-steps", type=int, default=32)
     parser.add_argument("--threshold", type=float, default=0.9)
@@ -217,10 +247,13 @@ def make_prompt_ids(
     return message, list(token_ids)
 
 
-def check_client_dependencies() -> None:
+def check_client_dependencies(offline_scored: bool = False) -> None:
     # Fail before launching SGLang if this client Python cannot reproduce NeMo-RL scoring.
     import requests  # noqa: F401
     import transformers  # noqa: F401
+
+    if offline_scored:
+        return
     from datasets import load_dataset  # noqa: F401
     from math_verify.errors import TimeoutException  # noqa: F401
     from math_verify.metric import math_metric  # noqa: F401
@@ -270,9 +303,15 @@ def write_dllm_config(args: argparse.Namespace) -> Path | None:
     # 'threshold' counts globally-confident positions, which is incompatible with the
     # leftmost selection policy (it reveals positions by index, k=1 per step). Emit it
     # for every other algorithm/policy combination.
-    if not (args.dllm_algorithm == "FastDiffuser" and args.selection_policy in ("leftmost", "entropy_bound")):
+    if not (
+        args.dllm_algorithm == "FastDiffuser"
+        and args.selection_policy in ("leftmost", "entropy_bound")
+    ):
         config["threshold"] = args.threshold
-    if args.dllm_algorithm == "FastDiffuser" and args.selection_policy == "entropy_bound":
+    if (
+        args.dllm_algorithm == "FastDiffuser"
+        and args.selection_policy == "entropy_bound"
+    ):
         config["entropy_bound"] = args.entropy_bound
     with open(config_path, "w", encoding="utf-8") as f:
         for key, value in config.items():
@@ -319,9 +358,16 @@ def server_command(args: argparse.Namespace, dllm_config: Path | None) -> list[s
             "--gpu-memory-utilization",
             str(args.mem_fraction_static),
             "--enforce-eager",
+            "--max-num-seqs",
+            str(args.max_running_requests),
         ]
-        if args.selection_policy in ("entropy_bound", "entropy_confidence_count") and args.dllm_algorithm != "AR":
-            raise ValueError(f"{args.selection_policy} selection is implemented for the SGLang backend only")
+        if (
+            args.selection_policy in ("entropy_bound", "entropy_confidence_count")
+            and args.dllm_algorithm != "AR"
+        ):
+            raise ValueError(
+                f"{args.selection_policy} selection is implemented for the SGLang backend only"
+            )
         if args.dllm_algorithm == "AR":
             # Serve the diffusion checkpoint as a plain causal LM via the AR
             # model class (is_diffusion -> False, standard causal decode).
@@ -422,18 +468,22 @@ def server_command(args: argparse.Namespace, dllm_config: Path | None) -> list[s
     if args.dllm_algorithm != "AR":
         if dllm_config is None:
             raise ValueError("dllm_config is required unless --dllm-algorithm AR")
-        cmd.extend([
-            "--dllm-algorithm",
-            args.dllm_algorithm,
-            "--dllm-algorithm-config",
-            str(dllm_config),
-        ])
+        cmd.extend(
+            [
+                "--dllm-algorithm",
+                args.dllm_algorithm,
+                "--dllm-algorithm-config",
+                str(dllm_config),
+            ]
+        )
     if args.server_random_seed is not None:
         cmd.extend(["--random-seed", str(args.server_random_seed)])
     return cmd
 
 
-def launch_server(args: argparse.Namespace, dllm_config: Path | None) -> subprocess.Popen:
+def launch_server(
+    args: argparse.Namespace, dllm_config: Path | None
+) -> subprocess.Popen:
     log_path = args.outdir / "server.log"
     env = os.environ.copy()
     env.setdefault("HF_HOME", "/lustre/fsw/portfolios/coreai/users/snorouzi/hf_home")
@@ -558,20 +608,38 @@ def generate_one_chat_completions(
     top_p: float,
     args: argparse.Namespace,
     benchmark_name: str,
+    *,
+    system_message: str | None = None,
+    prompt_length: int | None = None,
 ) -> dict[str, Any]:
     import requests
 
     content = prompt_template.format(question)
+    if prompt_length is not None:
+        available = args.context_length - prompt_length - 1
+        if available < 1:
+            raise ValueError(
+                f"Prompt ({prompt_length} tokens) exceeds context window ({args.context_length})"
+            )
+        max_new_tokens = min(max_new_tokens, available)
+    messages = []
+    if system_message:
+        messages.append({"role": "system", "content": system_message})
+    messages.append({"role": "user", "content": content})
+    # Diffusion sampling temperature lives in the engine's diffusion_config.
+    request_temperature = temperature
+    if args.backend == "vllm" and args.dllm_algorithm != "AR":
+        request_temperature = 0.0 if temperature == 0 else 1.0
     payload: dict[str, Any] = {
         "model": args.served_model_name,
-        "messages": [{"role": "user", "content": content}],
-        "temperature": temperature,
+        "messages": messages,
+        "temperature": request_temperature,
         "top_p": top_p,
         "max_tokens": max_new_tokens,
         "chat_template_kwargs": {"enable_thinking": args.enable_thinking == "true"},
     }
     if args.backend == "vllm" and args.thinking_budget > 0:
-        payload["thinking_token_budget"] = args.thinking_budget
+        payload["thinking_token_budget"] = min(args.thinking_budget, max_new_tokens - 1)
     if args.backend != "vllm":
         payload.update(
             {
@@ -602,6 +670,7 @@ def generate_one_chat_completions(
     return {
         "response": response,
         "raw_response": result,
+        "completion_tokens": (result.get("usage") or {}).get("completion_tokens"),
         "_requested_max_new_tokens": max_new_tokens,
         "prompt": content,
         "finish_reason": choice.get("finish_reason"),
@@ -622,17 +691,21 @@ def main() -> None:
         )
 
     if not args.dry_run:
-        check_client_dependencies()
+        check_client_dependencies(args.benchmark in OFFLINE_SCORED_BENCHMARKS)
 
     dllm_config = write_dllm_config(args)
     if dllm_config is None:
         if args.backend == "vllm":
             if args.dllm_algorithm == "AR":
-                print("vLLM AR mode: architectures override -> NemotronLabsDiffusionForCausalLM")
+                print(
+                    "vLLM AR mode: architectures override -> NemotronLabsDiffusionForCausalLM"
+                )
             else:
-                print(f"vLLM diffusion mode: {args.dllm_algorithm}, diffusion_config from decode args")
+                print(
+                    f"vLLM diffusion mode: {args.dllm_algorithm}, diffusion_config from decode args"
+                )
         else:
-            print("SGLang AR mode: json_model_override_args={\"ar_mode\": true}")
+            print('SGLang AR mode: json_model_override_args={"ar_mode": true}')
     else:
         print(f"DLLM config: {dllm_config}")
 
@@ -669,7 +742,9 @@ def main() -> None:
             dp_size=args.shard_dp_size,
             rank=args.shard_rank,
         )
-        verify_func = build_verifier()
+        verify_func = (
+            None if args.benchmark in OFFLINE_SCORED_BENCHMARKS else build_verifier()
+        )
 
         print(f"Loaded {len(samples)} {args.benchmark} samples")
         if args.shard_dp_size != 1:
@@ -687,7 +762,9 @@ def main() -> None:
         records: list[dict[str, Any]] = [None] * len(indexed_samples)  # type: ignore
         started = time.time()
 
-        def work(i: int, original_idx: int, sample: dict[str, str]) -> tuple[int, dict[str, Any]]:
+        def work(
+            i: int, original_idx: int, sample: dict[str, str]
+        ) -> tuple[int, dict[str, Any]]:
             prompt, input_ids = make_prompt_ids(
                 tokenizer,
                 prompt_template,
@@ -706,6 +783,8 @@ def main() -> None:
                     args.top_p,
                     args,
                     args.benchmark,
+                    system_message=sample.get("system_message"),
+                    prompt_length=len(input_ids),
                 )
                 prompt = result["prompt"]
                 response = result["response"]
@@ -727,10 +806,12 @@ def main() -> None:
                 "source_id": sample.get("source_id"),
                 "question": sample["question"],
                 "gold": sample["gold"],
+                "raw_answer": sample.get("raw_answer"),
                 "prompt": prompt,
                 "prompt_len": len(input_ids),
                 "requested_max_new_tokens": result.get("_requested_max_new_tokens"),
                 "output_ids": output_ids,
+                "completion_tokens": result.get("completion_tokens", len(output_ids)),
                 "nfe": result.get("nfe"),
                 "finish_reason": result.get("finish_reason"),
                 "response": response,
@@ -740,9 +821,16 @@ def main() -> None:
         generation_batch_size = args.generation_batch_size or len(indexed_samples)
         if generation_batch_size < 1:
             raise ValueError("--generation-batch-size must be >= 1 when set")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrent) as pool:
+        with (
+            open(
+                args.outdir / "records.partial.jsonl", "w", encoding="utf-8"
+            ) as partial,
+            concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrent) as pool,
+        ):
             for batch_start in range(0, len(indexed_samples), generation_batch_size):
-                batch = indexed_samples[batch_start : batch_start + generation_batch_size]
+                batch = indexed_samples[
+                    batch_start : batch_start + generation_batch_size
+                ]
                 futures = [
                     pool.submit(work, batch_start + j, original_idx, sample)
                     for j, (original_idx, sample) in enumerate(batch)
@@ -758,14 +846,18 @@ def main() -> None:
                         )
                         record["reward"] = score
                         record["extracted"] = repr(extracted)
+                    partial.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    partial.flush()
                     records[i] = record
                     done += 1
                     if done % 100 == 0 or done == len(indexed_samples):
-                        print(f"  [{done}/{len(indexed_samples)}] evaluated", flush=True)
+                        print(
+                            f"  [{done}/{len(indexed_samples)}] evaluated", flush=True
+                        )
 
         correct = sum(1 for r in records if r["reward"] == 1.0)
         total = len(records)
-        avg_len = sum(len(r["output_ids"]) for r in records) / max(total, 1)
+        avg_len = sum(r["completion_tokens"] or 0 for r in records) / max(total, 1)
         elapsed = time.time() - started
         offline_scored = args.benchmark in OFFLINE_SCORED_BENCHMARKS
         metrics = {
@@ -779,6 +871,8 @@ def main() -> None:
             "settings": vars(args),
         }
 
+        if offline_scored:
+            metrics["scoring"] = f"offline: tools/{args.benchmark}/score_*.py"
         with open(args.outdir / "records.jsonl", "w", encoding="utf-8") as f:
             for record in records:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -786,9 +880,6 @@ def main() -> None:
             json.dump(metrics, f, indent=2, default=str)
 
         if offline_scored:
-            metrics["scoring"] = (
-                "offline; grade records.jsonl with tools/ifbench/score_ifbench.py"
-            )
             print(
                 f"{args.benchmark}: generated {total} responses; "
                 "accuracy is computed by the offline scorer, not this job."

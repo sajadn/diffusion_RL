@@ -1,0 +1,34 @@
+# Superv3/v30: four math, three math-with-Python, and two coding subsets.
+# Build data with tools/nemotron_diffusion/prepare_superv3_math_code_tools.py;
+# dataset provenance, counts, and holdout rules are recorded in manifest.json.
+# Inherits the working AR recipe: refreshed 8B SFT model, lr=1e-6, activation
+# checkpointing, 120 prompts x 16 generations, 8 train + 8 generation nodes.
+# Submit through the ar-rl-job skill with NEMO_SKILLS_SANDBOX=1.
+defaults: ar_grpo_ns.yaml
+
+policy:
+  generation:
+    # Evaluate only the AR policy used for this experiment.
+    vllm_val_dllm_variants: null
+
+env:
+  nemo_gym:
+    config_paths:
+      - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+      - resources_servers/math_with_judge/configs/math_with_judge.yaml
+      - resources_servers/code_gen/configs/code_gen.yaml
+      - resources_servers/ns_tools/configs/ns_tools.yaml
+
+data:
+  train:
+    data_path: /lustre/fsw/portfolios/coreai/users/snorouzi/diffusion_rl/dataset/v30_math_code_tools/train.jsonl
+  validation:
+    data_path: /lustre/fsw/portfolios/coreai/users/snorouzi/diffusion_rl/dataset/v30_math_code_tools/val.jsonl
+
+checkpointing:
+  checkpoint_dir: ${oc.env:CHECKPOINT_DIR,results/ar-grpo-superv3-math-code-tools}
+
+logger:
+  log_dir: ${oc.env:LOG_DIR,logs/ar-grpo-superv3-math-code-tools}
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,ar_grpo_superv3_math_code_tools}
