@@ -445,6 +445,20 @@ class ESPOBlockAwareLogprobEstimationConfig(TypedDict):
     exclude_mask_token_from_logits: NotRequired[bool]
 
 
+class ConfidenceExperimentConfig(TypedDict):
+    """Opt-in Sudoku transition-discrepancy experiments; omit to disable.
+
+    filter_bound is a per-transition probability factor (>1); importance_clip
+    caps the full-trajectory weight (>=1). Values are supplied by experiment YAML.
+    control selects diagnostic generation through the replay forward path.
+    """
+
+    mode: Literal["filter", "importance", "control"]
+    filter_bound: float
+    importance_clip: float
+    start_checkpoint: NotRequired[str]
+
+
 class TraceGRPOLogprobEstimationConfig(TypedDict):
     """Estimate response logprobs by replaying the inference denoising trajectory.
 
@@ -463,6 +477,11 @@ class TraceGRPOLogprobEstimationConfig(TypedDict):
     setting).
     """
 
+    # Opt-in full transition score; requires synchronous single-update training.
+    confidence_transition_correction: NotRequired[bool]
+    # Must equal the rollout decoder threshold (0.9 in the provided configs).
+    confidence_threshold: NotRequired[float]
+    confidence_experiment: NotRequired[ConfidenceExperimentConfig]
     type: Literal["trace_grpo"]
     mask_token_id: int
     # If omitted, the model module's ``config.block_size`` is used.

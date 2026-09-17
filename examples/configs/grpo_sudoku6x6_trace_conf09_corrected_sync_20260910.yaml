@@ -1,0 +1,43 @@
+# Full confidence-threshold transition score, synchronous one-update GRPO.
+# Includes proposal rejection/fallback probabilities and complete latent blocks.
+# This is an on-policy score-function experiment, not corrected off-policy PPO.
+defaults: grpo_sudoku6x6_trace_grpo_vllm_conf09_t1_fullblocks_tis_async_grpo.yaml
+
+grpo:
+  max_num_steps: 300
+  async_grpo:
+    enabled: false
+  num_updates_per_rollout: 1
+
+policy:
+  logprob_estimation:
+    positive_anchor_weight: 0.0
+    positive_anchor_skip: 0
+    confidence_transition_correction: true
+    confidence_threshold: 0.9
+    block_size: 16
+  generation:
+    vllm_val_dllm_overrides:
+      vllm_kwargs:
+        diffusion_config:
+          max_denoising_steps: 16
+  megatron_cfg:
+    env_vars:
+      # The submission wrapper overrides this existing key via Hydra.
+      PYTHONPATH: /lustre/fsw/portfolios/coreai/users/snorouzi/nemorl_runtime_patches
+      TORCHINDUCTOR_COMPILE_THREADS: '1'
+
+loss_fn:
+  negative_advantage_weight: 1.0
+  negative_advantage_confidence_threshold: null
+  force_on_policy_ratio: true
+  use_importance_sampling_correction: false
+  truncated_importance_sampling_ratio: null
+
+checkpointing:
+  checkpoint_dir: results/sud6_conf09_corrected_sync_20260910
+
+logger:
+  log_dir: logs/sud6_conf09_corrected_sync_20260910
+  wandb:
+    name: sud6_conf09_corrected_sync_20260910

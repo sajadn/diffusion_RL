@@ -1,0 +1,53 @@
+diff --git a/vllm/model_executor/models/nemotron_dllm.py b/vllm/model_executor/models/nemotron_dllm.py
+--- a/vllm/model_executor/models/nemotron_dllm.py
++++ b/vllm/model_executor/models/nemotron_dllm.py
+@@ -22,6 +22,7 @@
+ from __future__ import annotations
+
+ import math
++import os
+ from collections.abc import Iterable
+ from types import SimpleNamespace
+ from typing import Any
+@@ -30,6 +31,14 @@
+ import torch
+ from torch import nn
+ from transformers import PretrainedConfig
++
++_confidence_experiment = None
++if os.environ.get("NRL_CONFIDENCE_EXPERIMENT_DIR"):
++    import confidence_experiment as _confidence_experiment
++
++_confidence_audit = None
++if os.environ.get("NRL_CONFIDENCE_AUDIT_DIR"):
++    import confidence_audit_hooks as _confidence_audit
+
+ from vllm.config import VllmConfig
+ from vllm.config.compilation import CUDAGraphMode
+@@ -1240,6 +1249,14 @@
+
+         req_temps = self.sampling_states.temperature.gpu[decode_slots]
+
++        audit_context = None
++        if _confidence_audit is not None:
++            audit_context = _confidence_audit.before_sample(self, decode_slots, is_committing)
++
++        experiment_context = None
++        if _confidence_experiment is not None:
++            experiment_context = _confidence_experiment.before_sample(self, decode_slots, is_committing)
++
+         logits_3d = _compiled_masked_step(
+             logits[: num_decode * CL],
+             decode_slots,
+@@ -1276,6 +1293,11 @@
+             entropy_budget_mode=self.entropy_budget_mode,
+             entropy_bound=self.entropy_bound,
+         )
++
++        if _confidence_audit is not None:
++            _confidence_audit.after_sample(self, audit_context, logits_3d)
++        if _confidence_experiment is not None:
++            _confidence_experiment.after_sample(self, experiment_context, logits_3d)
+
+         # TPF accounting (tensor ops only -- no host sync). Rows that were
+         # denoising this step each consumed one forward; rows that committed

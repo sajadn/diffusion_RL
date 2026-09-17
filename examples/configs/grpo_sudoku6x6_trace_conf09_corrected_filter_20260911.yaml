@@ -1,0 +1,16 @@
+# Corrected confidence with per-transition discrepancy filtering.
+# Launch through tools/nemotron_diffusion/run_confidence_experiment.py.
+defaults: grpo_sudoku6x6_trace_conf09_corrected_sync_20260910.yaml
+
+grpo:
+  max_num_steps: 100
+
+policy:
+  logprob_estimation:
+    confidence_experiment:
+      mode: filter
+      filter_bound: 4.0
+      importance_clip: 2.0
+
+checkpointing:
+  save_period: 20

@@ -389,6 +389,8 @@ def build_fully_masked_completion_loss_batch(
         noisy_tail_mode=noisy_tail_mode,
         eos_token_id=eos_token_id,
     )
+    if "confidence_actor_weight" in data:
+        batch["confidence_actor_weight"] = data["confidence_actor_weight"]
     total_length = batch["input_ids"].shape[1]
     completion_starts = batch["diffu_grpo_completion_starts"]
     response_lengths = batch["diffu_grpo_response_lengths"]

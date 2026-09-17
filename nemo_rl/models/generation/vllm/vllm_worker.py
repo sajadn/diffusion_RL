@@ -157,6 +157,7 @@ class BaseVllmGenerationWorker:
             "diffusion_config"
         ) or {}
         self.return_entropy = bool(_diffusion_cfg.get("return_entropy", False))
+        self.return_reveal_steps = bool(_diffusion_cfg.get("return_reveal_steps"))
 
         # Store the Python executable being used by this worker
         self.py_executable = sys.executable
@@ -860,6 +861,13 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
             # every non-diffusion model and whenever the channel is off.
             full_reveal_steps = torch.zeros(total_length, dtype=torch.long)
             gen_reveal_steps = getattr(generation, "reveal_steps", None)
+            if self.return_reveal_steps and (
+                gen_reveal_steps is None or len(gen_reveal_steps) != len(generated_tokens)
+            ):
+                raise RuntimeError(
+                    "return_reveal_steps was requested, but vLLM did not return "
+                    "one reveal step per generated token."
+                )
             if gen_reveal_steps:
                 for idx, step in enumerate(gen_reveal_steps):
                     position = sequence_length + idx

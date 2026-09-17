@@ -175,6 +175,10 @@ class TraceGRPOMegatronPolicyWorkerImpl(DiffuGRPOMegatronPolicyWorkerImpl):
             include_loss=True,
             max_reveal_levels=cfg.get("max_reveal_levels"),
         )
+        if cfg.get("confidence_transition_correction", False):
+            from nemo_rl.algorithms.confidence_transition import validate_complete_trace
+
+            validate_complete_trace(base, block_size, cfg["mask_token_id"], data)
         # One forward per level; samples within a level are microbatched the
         # standard way by train_micro_batch_size (passed in as ``mbs``). A single
         # forward_backward over the whole schedule accumulates gradients across
@@ -260,6 +264,16 @@ class TraceGRPOMegatronPolicyWorkerImpl(DiffuGRPOMegatronPolicyWorkerImpl):
         # the scattered per-level logprobs are summed into the [N, S] vector. The
         # pass count is ``num_levels`` on every rank (agreed in build_trace_base),
         # so this stays DP-uniform.
+        self._tr_confidence = {}
+        if "confidence_collect" in data:
+            from nemo_rl.algorithms.diffu_grpo_logprobs import _scatter_original_response_values
+
+            base["confidence_collect"] = data["confidence_collect"]
+            base["generation_logprobs"] = _scatter_original_response_values(
+                values=data["generation_logprobs"], total_length=base["input_ids"].shape[1],
+                completion_starts=base["diffu_grpo_completion_starts"],
+                response_lengths=base["diffu_grpo_response_lengths"],
+            )
         self._tr_base = base
         self._tr_sampled_levels = sampled_levels
         self._tr_reveal_mbs = reveal_mbs
@@ -278,7 +292,12 @@ class TraceGRPOMegatronPolicyWorkerImpl(DiffuGRPOMegatronPolicyWorkerImpl):
         finally:
             self._tr_base = None
             self._tr_sampled_levels = None
-        return BatchedDataDict[LogprobOutputSpec](logprobs=accumulated).to("cpu")
+        result = BatchedDataDict[LogprobOutputSpec](logprobs=accumulated)
+        if self._tr_confidence:
+            for name, value in self._tr_confidence.items():
+                result[name] = value.max(-1).values if name == "confidence_max_step_error" else value.sum(-1)
+        self._tr_confidence = {}
+        return result.to("cpu")
 
     def _build_logprob_megatron_batch(
         self,
@@ -329,6 +348,22 @@ class TraceGRPOMegatronPolicyWorkerImpl(DiffuGRPOMegatronPolicyWorkerImpl):
         flat_logprobs = torch.cat(
             [lp["logprobs"] for lp in list_of_logprobs], dim=0
         )
+        if "confidence_collect" in transformed_data:
+            from confidence_experiment import FIELDS
+
+            for name in FIELDS:
+                flat = torch.cat([item[name] for item in list_of_logprobs], dim=0)
+                scattered = scatter_block_reveal_logprobs(
+                    flat_logprobs=flat, harvest_mask=transformed_data["block_reveal_harvest_mask"],
+                    sample_index=transformed_data["block_reveal_sample_index"],
+                    completion_starts=transformed_data["diffu_grpo_completion_starts"],
+                    noisy_response_offset=metadata["noisy_response_offset"],
+                    original_seq_len=metadata["original_seq_len"], num_samples=metadata["num_samples"],
+                )
+                self._tr_confidence[name] = self._tr_confidence.get(name, 0) + scattered
+                if name == "confidence_logratio":
+                    previous = self._tr_confidence.get("confidence_max_step_error", torch.zeros_like(scattered))
+                    self._tr_confidence["confidence_max_step_error"] = torch.maximum(previous, scattered.abs())
         return scatter_block_reveal_logprobs(
             flat_logprobs=flat_logprobs,
             harvest_mask=transformed_data["block_reveal_harvest_mask"],

@@ -641,6 +641,11 @@ def setup(
     # ==========================
     loss_fn = ClippedPGLossFn(loss_config)
 
+    if policy_config.get("logprob_estimation", {}).get("confidence_transition_correction", False):
+        from nemo_rl.algorithms.confidence_transition import validate_correction_config
+
+        validate_correction_config(grpo_config, policy_config, loss_config)
+
     # Validate force_on_policy_ratio
     if loss_config.get("force_on_policy_ratio", False):
         assert (
@@ -2087,6 +2092,10 @@ def grpo_train(
                     policy_generation, "snapshot_step_metrics"
                 ):
                     policy_generation.snapshot_step_metrics()
+                if os.environ.get("NRL_CONFIDENCE_EXPERIMENT_DIR"):
+                    from confidence_experiment import start_round
+
+                    start_round(total_steps)
                 with timer.time("generation"):
                     # Clear logger metrics for each generation step
                     if policy_generation is not None:
@@ -2385,9 +2394,19 @@ def grpo_train(
                         logprob_data["trace_level_sample_seed"] = train_data[
                             "trace_level_sample_seed"
                         ]
+                    confidence_experiment = master_config["policy"].get("logprob_estimation", {}).get("confidence_experiment")
+                    if confidence_experiment:
+                        logprob_data["confidence_collect"] = torch.ones_like(logprob_data["sample_mask"])
+                        logprob_data["generation_logprobs"] = train_data["generation_logprobs"]
                     prev_logprobs_out = policy.get_logprobs(
                         logprob_data, timer=timer
                     )
+                    if confidence_experiment:
+                        from confidence_experiment import attach_weights
+
+                        confidence_stats = attach_weights(train_data, prev_logprobs_out, confidence_experiment)
+                        logger.log_metrics({k: v for k, v in confidence_stats.items() if v is not None}, total_steps + 1, prefix="confidence")
+                        del logprob_data["confidence_collect"]
                     train_data["prev_logprobs"] = prev_logprobs_out["logprobs"]
                     # Coupled/ESPO K > 1: also carry pairs 1..K-1 prev logprobs (no-op else).
                     _maybe_capture_coupled_pair_logprobs(
@@ -2456,6 +2475,11 @@ def grpo_train(
                         logprobs_policy=train_data["prev_logprobs"],
                         logprobs_reference=train_data.get("reference_policy_logprobs"),
                     )
+                    if "confidence_actor_weight" in train_data:
+                        from confidence_experiment import log_retained_advantages
+
+                        retained_stats = log_retained_advantages(train_data, prompt_ids_for_adv, rewards)
+                        logger.log_metrics(retained_stats, total_steps + 1, prefix="confidence")
                     del prompt_ids_for_adv
 
                     # Log rewards and advantages information

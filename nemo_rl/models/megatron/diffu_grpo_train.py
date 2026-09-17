@@ -442,7 +442,7 @@ class DiffuGRPOLossPostProcessor(LossPostProcessor):
                 kl_type=getattr(self.loss_fn, "reference_policy_kl_type", "k3"),
             )
 
-            return self._aligned_loss(
+            loss, metrics = self._aligned_loss(
                 token_logprobs=token_logprobs,
                 loss_mask=loss_mask,
                 sample_mask=sample_mask,
@@ -457,6 +457,29 @@ class DiffuGRPOLossPostProcessor(LossPostProcessor):
                 global_valid_seqs=global_valid_seqs,
                 global_valid_toks=global_valid_toks,
             )
+            if logprob_estimation_cfg.get("confidence_transition_correction", False):
+                from nemo_rl.algorithms.confidence_transition import on_policy_correction
+
+                if os.environ.get("NRL_CONFIDENCE_AUDIT_DIR"):
+                    from confidence_audit_hooks import replay
+
+                    replay(output_tensor, token_logprobs, data_dict,
+                           int(logprob_estimation_cfg["block_size"]),
+                           float(logprob_estimation_cfg["confidence_threshold"]),
+                           mask_token_id)
+
+                correction, correction_metrics = on_policy_correction(
+                    logits=output_tensor,
+                    token_logprobs=token_logprobs,
+                    data=data_dict,
+                    global_valid_toks=global_valid_toks,
+                    block_size=int(logprob_estimation_cfg["block_size"]),
+                    threshold=float(logprob_estimation_cfg["confidence_threshold"]),
+                    mask_token_id=mask_token_id,
+                )
+                loss = loss + correction * self.num_microbatches
+                metrics.update(correction_metrics)
+            return loss, metrics
 
         return loss_fn_inner
 
@@ -563,8 +586,11 @@ class DiffuGRPOLogprobsPostProcessor(LogprobsPostProcessor):
                 token_logprobs = mask_out_neg_inf_logprobs(
                     token_logprobs, loss_mask, "prev_logprobs"
                 )
-            return torch.tensor(0.0, device=token_logprobs.device), {
-                "logprobs": token_logprobs
-            }
+            result = {"logprobs": token_logprobs}
+            if "confidence_collect" in data_dict:
+                from confidence_experiment import replay_fields
+
+                result.update(replay_fields(output_tensor, data_dict))
+            return torch.tensor(0.0, device=token_logprobs.device), result
 
         return processor_fn_inner

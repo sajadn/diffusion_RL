@@ -239,19 +239,9 @@ def build_trace_base(
     completion_starts = base["diffu_grpo_completion_starts"]
     response_lengths = base["diffu_grpo_response_lengths"]
 
-    # Fail fast on the config-mismatch signature: when the rollout did not opt into
-    # the reveal-step channel, the SGLang worker zero-fills reveal_steps, so every
-    # response token reports step 0. A real confidence trajectory over block_size>1
-    # always has later-step / force-commit tokens, so all-zero reveal_steps means the
-    # FastDiffuser dllm config is missing logprob_mode: trajectory /
-    # return_reveal_steps: true -- guard rather than train a degenerate schedule.
-    if num_samples > 0 and not bool((reveal_steps != 0).any()):
-        raise RuntimeError(
-            "TraceGRPO received all-zero reveal steps: the SGLang rollout "
-            "did not emit the inference trajectory. Set logprob_mode: trajectory "
-            "AND return_reveal_steps: true in the FastDiffuser dllm_algorithm_config "
-            "(tools/nemotron_diffusion/trace_fastdiffuser.yaml)."
-        )
+    # Zero is a valid denoising step: a confident block may reveal every token
+    # on its first forward. Missing metadata is checked by key presence above,
+    # rather than inferred from the values of a valid trajectory.
 
     # Trajectory -> gapless-ordinal levels -> num_levels (both layout-independent),
     # then place the levels into the noisy layout.

@@ -997,6 +997,13 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 device=original_input_ids_single_row.device,
             )
             gen_reveal_steps = getattr(generation_details, "reveal_steps", None)
+            if self.return_reveal_steps and (
+                gen_reveal_steps is None or len(gen_reveal_steps) != num_generated_tokens
+            ):
+                raise RuntimeError(
+                    "return_reveal_steps was requested, but vLLM did not return "
+                    "one reveal step per generated token."
+                )
             if gen_reveal_steps:
                 for idx, step in enumerate(gen_reveal_steps):
                     position_in_output_tensor = current_input_actual_length + idx
