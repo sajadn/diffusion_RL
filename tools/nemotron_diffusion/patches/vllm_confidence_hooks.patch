@@ -1,3 +1,22 @@
+diff --git a/vllm/config/diffusion.py b/vllm/config/diffusion.py
+--- a/vllm/config/diffusion.py
++++ b/vllm/config/diffusion.py
+@@ -76,6 +76,15 @@
+     model's generation_config.json (``diffusion_confidence_threshold``),
+     defaulting to 0.9. Ignored by the other selection policies."""
+
++    record_confidence_experiment: bool = False
++    """Internal opt-in for corrected Trace rollout/replay experiment records.
++    Set by the training config; a directory environment variable alone does
++    not enable capture. Defaults off for AR and other diffusion runs."""
++
++    record_confidence_audit: bool = False
++    """Internal opt-in for paired confidence transition diagnostics.
++    Independent of experiment recording; defaults off."""
++
+     return_entropy: bool | None = None
+     """Emit per-token entropy ``H = -sum_v p_v log p_v`` of the sampling
+     distribution, captured at the denoise step each token was unmasked
 diff --git a/vllm/model_executor/models/nemotron_dllm.py b/vllm/model_executor/models/nemotron_dllm.py
 --- a/vllm/model_executor/models/nemotron_dllm.py
 +++ b/vllm/model_executor/models/nemotron_dllm.py
@@ -9,45 +28,176 @@ diff --git a/vllm/model_executor/models/nemotron_dllm.py b/vllm/model_executor/m
  from collections.abc import Iterable
  from types import SimpleNamespace
  from typing import Any
-@@ -30,6 +31,14 @@
- import torch
- from torch import nn
- from transformers import PretrainedConfig
-+
-+_confidence_experiment = None
-+if os.environ.get("NRL_CONFIDENCE_EXPERIMENT_DIR"):
-+    import confidence_experiment as _confidence_experiment
-+
-+_confidence_audit = None
-+if os.environ.get("NRL_CONFIDENCE_AUDIT_DIR"):
-+    import confidence_audit_hooks as _confidence_audit
+@@ -716,6 +717,12 @@
+                 f"Unknown diffusion selection_policy: {selection!r}"
+             )
+         self.selection_policy = selection
++        self.record_confidence_experiment = bool(
++            diffusion_config and diffusion_config.record_confidence_experiment
++        )
++        self.record_confidence_audit = bool(
++            diffusion_config and diffusion_config.record_confidence_audit
++        )
+         self.entropy_bound = (
+             diffusion_config.entropy_bound if diffusion_config else 0.1
+         )
+@@ -786,6 +793,8 @@
+             entropy_bound=self.entropy_bound,
+             return_entropy=self.return_entropy,
+             return_reveal_steps=self.return_reveal_steps,
++            record_confidence_experiment=self.record_confidence_experiment,
++            record_confidence_audit=self.record_confidence_audit,
+         ), None
 
- from vllm.config import VllmConfig
- from vllm.config.compilation import CUDAGraphMode
-@@ -1240,6 +1249,14 @@
+     def add_request(self, req_index: int, new_req_data: Any) -> None:
+@@ -896,6 +905,20 @@
+     return sampler.tpf_stats(reset=reset)
+
+
++def _load_confidence_hooks(record_experiment: bool, record_audit: bool):
++    """Import only explicitly enabled sampler hooks; env vars supply paths."""
++    experiment = audit = None
++    if record_experiment:
++        if not os.environ.get("NRL_CONFIDENCE_EXPERIMENT_DIR"):
++            raise ValueError("Confidence experiment capture requires NRL_CONFIDENCE_EXPERIMENT_DIR")
++        import confidence_experiment as experiment
++    if record_audit:
++        if not os.environ.get("NRL_CONFIDENCE_AUDIT_DIR"):
++            raise ValueError("Confidence audit capture requires NRL_CONFIDENCE_AUDIT_DIR")
++        import confidence_audit_hooks as audit
++    return experiment, audit
++
++
+ class MaskedDiffusionSampler:
+     """Batched masked-diffusion sampler (LLaDA-style).
+
+@@ -946,7 +969,12 @@
+         return_entropy: bool = False,
+         return_reveal_steps: bool = False,
+         entropy_bound: float = 0.1,
++        record_confidence_experiment: bool = False,
++        record_confidence_audit: bool = False,
+     ):
++        self._confidence_experiment, self._confidence_audit = _load_confidence_hooks(
++            record_confidence_experiment, record_confidence_audit
++        )
+         self.sampling_states = sampler.sampling_states
+         self.req_states = sampler.req_states
+         self.vocab_size = vocab_size
+@@ -1044,6 +1072,27 @@
+             max_num_reqs, dtype=torch.bool, device=device
+         )
+
++    def _capture_confidence_contexts(self, decode_slots, is_committing, req_temps):
++        """Skip disabled capture and validation decoders outside the hook contract."""
++        if self._confidence_experiment is None and self._confidence_audit is None:
++            return None, None
++        if not (
++            self.threshold_mode
++            and self.temperature == 1.0
++            and self.log_threshold == math.log(0.9)
++            and self.canvas_length == 16
++            and self.mask_token_id == 100
++        ):
++            return None, None
++        # Per-request greedy validation does not sample from the T=1 policy.
++        skipped = is_committing | (req_temps == 0)
++        experiment = audit = None
++        if self._confidence_experiment is not None:
++            experiment = self._confidence_experiment.before_sample(self, decode_slots, skipped)
++        if self._confidence_audit is not None:
++            audit = self._confidence_audit.before_sample(self, decode_slots, skipped)
++        return experiment, audit
++
+     def add_request(self, req_idx: int, prompt_len: int, sampling_params: Any) -> None:
+         if use_penalty(sampling_params):
+             logger.warning_once(
+@@ -1239,6 +1288,10 @@
+         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
 
          req_temps = self.sampling_states.temperature.gpu[decode_slots]
++
++        experiment_context, audit_context = self._capture_confidence_contexts(
++            decode_slots, is_committing, req_temps
++        )
 
-+        audit_context = None
-+        if _confidence_audit is not None:
-+            audit_context = _confidence_audit.before_sample(self, decode_slots, is_committing)
-+
-+        experiment_context = None
-+        if _confidence_experiment is not None:
-+            experiment_context = _confidence_experiment.before_sample(self, decode_slots, is_committing)
-+
          logits_3d = _compiled_masked_step(
              logits[: num_decode * CL],
-             decode_slots,
-@@ -1276,6 +1293,11 @@
+@@ -1276,6 +1329,11 @@
              entropy_budget_mode=self.entropy_budget_mode,
              entropy_bound=self.entropy_bound,
          )
 +
-+        if _confidence_audit is not None:
-+            _confidence_audit.after_sample(self, audit_context, logits_3d)
-+        if _confidence_experiment is not None:
-+            _confidence_experiment.after_sample(self, experiment_context, logits_3d)
++        if audit_context is not None:
++            self._confidence_audit.after_sample(self, audit_context, logits_3d)
++        if experiment_context is not None:
++            self._confidence_experiment.after_sample(self, experiment_context, logits_3d)
 
          # TPF accounting (tensor ops only -- no host sync). Rows that were
          # denoising this step each consumed one forward; rows that committed
+diff --git a/tests/models/language/generation/test_nemotron_dllm.py b/tests/models/language/generation/test_nemotron_dllm.py
+--- a/tests/models/language/generation/test_nemotron_dllm.py
++++ b/tests/models/language/generation/test_nemotron_dllm.py
+@@ -952,3 +952,62 @@
+                 torch.testing.assert_close(ent[:, j], h[j].expand(batch))
+                 fraction = canvas[:, j].eq(1).float().mean().item()
+                 assert abs(fraction - float(lp_ref[j, 1].exp())) < .035
++
++
++def test_confidence_hook_activation_is_explicit_and_independent(monkeypatch):
++    from types import SimpleNamespace
++    import builtins
++    from vllm.model_executor.models.nemotron_dllm import _load_confidence_hooks
++
++    monkeypatch.setenv("NRL_CONFIDENCE_EXPERIMENT_DIR", "/stale/experiment")
++    monkeypatch.setenv("NRL_CONFIDENCE_AUDIT_DIR", "/stale/audit")
++    experiment, audit = SimpleNamespace(), SimpleNamespace()
++    imported = []
++    original_import = builtins.__import__
++
++    def import_hook(name, *args, **kwargs):
++        if name in ("confidence_experiment", "confidence_audit_hooks"):
++            imported.append(name)
++            return experiment if name == "confidence_experiment" else audit
++        return original_import(name, *args, **kwargs)
++
++    monkeypatch.setattr(builtins, "__import__", import_hook)
++    assert _load_confidence_hooks(False, False) == (None, None)
++    assert imported == []
++    assert _load_confidence_hooks(False, True) == (None, audit)
++    assert imported == ["confidence_audit_hooks"]
++    assert _load_confidence_hooks(True, False) == (experiment, None)
++    assert imported == ["confidence_audit_hooks", "confidence_experiment"]
++    monkeypatch.delenv("NRL_CONFIDENCE_EXPERIMENT_DIR")
++    with pytest.raises(ValueError, match="NRL_CONFIDENCE_EXPERIMENT_DIR"):
++        _load_confidence_hooks(True, False)
++
++
++def test_confidence_capture_skips_validation_policy_switches_and_greedy_rows():
++    from types import SimpleNamespace
++    from vllm.model_executor.models.nemotron_dllm import MaskedDiffusionSampler
++
++    calls = []
++    def before(sampler, slots, skip):
++        calls.append(skip.clone())
++        return "capture"
++
++    sampler = SimpleNamespace(
++        _confidence_experiment=SimpleNamespace(before_sample=before),
++        _confidence_audit=None, threshold_mode=True, temperature=1.0,
++        log_threshold=math.log(.9), canvas_length=16, mask_token_id=100,
++    )
++    capture = MaskedDiffusionSampler._capture_confidence_contexts
++    slots = torch.arange(3)
++    committing = torch.tensor([False, False, True])
++    req_temps = torch.tensor([1., 0., 1.])
++    assert capture(sampler, slots, committing, req_temps) == ("capture", None)
++    torch.testing.assert_close(calls[0], torch.tensor([False, True, True]))
++    for field, value in [("threshold_mode", False), ("temperature", .6), ("log_threshold", math.log(.8))]:
++        previous = getattr(sampler, field)
++        setattr(sampler, field, value)
++        assert capture(sampler, slots, committing, req_temps) == (None, None)
++        assert len(calls) == 1
++        setattr(sampler, field, previous)
++    sampler._confidence_experiment = None
++    assert capture(sampler, slots, committing, req_temps) == (None, None)

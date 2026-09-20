@@ -16,6 +16,11 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_rank,
 )
 
+from nemo_rl.algorithms.confidence_config import (
+    get_confidence_experiment_config,
+    is_corrected_confidence_trace,
+)
+
 from nemo_rl.algorithms.logits_sampling_utils import (
     TrainingSamplingParams,
     need_top_k_or_top_p_filtering,
@@ -457,7 +462,7 @@ class DiffuGRPOLossPostProcessor(LossPostProcessor):
                 global_valid_seqs=global_valid_seqs,
                 global_valid_toks=global_valid_toks,
             )
-            if logprob_estimation_cfg.get("confidence_transition_correction", False):
+            if is_corrected_confidence_trace(self.cfg):
                 from nemo_rl.algorithms.confidence_transition import on_policy_correction
 
                 if os.environ.get("NRL_CONFIDENCE_AUDIT_DIR"):
@@ -587,7 +592,7 @@ class DiffuGRPOLogprobsPostProcessor(LogprobsPostProcessor):
                     token_logprobs, loss_mask, "prev_logprobs"
                 )
             result = {"logprobs": token_logprobs}
-            if "confidence_collect" in data_dict:
+            if get_confidence_experiment_config(self.cfg) and "confidence_collect" in data_dict:
                 from confidence_experiment import replay_fields
 
                 result.update(replay_fields(output_tensor, data_dict))

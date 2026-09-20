@@ -35,6 +35,13 @@ from nemo_rl.algorithms.advantage_estimator import (
 )
 from nemo_rl.algorithms.block_just_grpo_logprobs import require_generation_entropy
 from nemo_rl.algorithms.coupled_grpo_logprobs import maybe_set_coupled_grpo_seed
+from nemo_rl.algorithms.confidence_config import (
+    clear_confidence_recording,
+    configure_confidence_recording,
+    get_confidence_experiment_config,
+    is_corrected_confidence_trace,
+    start_confidence_round,
+)
 from nemo_rl.algorithms.trace_grpo_logprobs import maybe_set_trace_level_seed
 from nemo_rl.algorithms.loss import (
     ClippedPGLossConfig,
@@ -385,6 +392,7 @@ def _build_val_generation_config(
     val_config[spec["overrides_key"]] = None
     val_config[spec["variants_key"]] = None
     _deep_update(val_config, copy.deepcopy(overrides))
+    clear_confidence_recording(val_config)
 
     _assert_val_group_shares_memory(
         backend, generation_config, val_config, overrides
@@ -517,6 +525,10 @@ def setup(
         "A generation config in the PolicyConfig is required for GRPO"
     )
 
+    configure_confidence_recording(
+        policy_config, audit_requested=bool(os.environ.get("NRL_CONFIDENCE_AUDIT_DIR"))
+    )
+
     # Set seed for all random number generators
     set_seed(grpo_config["seed"])
 
@@ -641,7 +653,7 @@ def setup(
     # ==========================
     loss_fn = ClippedPGLossFn(loss_config)
 
-    if policy_config.get("logprob_estimation", {}).get("confidence_transition_correction", False):
+    if is_corrected_confidence_trace(policy_config):
         from nemo_rl.algorithms.confidence_transition import validate_correction_config
 
         validate_correction_config(grpo_config, policy_config, loss_config)
@@ -2092,10 +2104,7 @@ def grpo_train(
                     policy_generation, "snapshot_step_metrics"
                 ):
                     policy_generation.snapshot_step_metrics()
-                if os.environ.get("NRL_CONFIDENCE_EXPERIMENT_DIR"):
-                    from confidence_experiment import start_round
-
-                    start_round(total_steps)
+                start_confidence_round(master_config["policy"], total_steps)
                 with timer.time("generation"):
                     # Clear logger metrics for each generation step
                     if policy_generation is not None:
@@ -2394,7 +2403,9 @@ def grpo_train(
                         logprob_data["trace_level_sample_seed"] = train_data[
                             "trace_level_sample_seed"
                         ]
-                    confidence_experiment = master_config["policy"].get("logprob_estimation", {}).get("confidence_experiment")
+                    confidence_experiment = get_confidence_experiment_config(
+                        master_config["policy"]
+                    )
                     if confidence_experiment:
                         logprob_data["confidence_collect"] = torch.ones_like(logprob_data["sample_mask"])
                         logprob_data["generation_logprobs"] = train_data["generation_logprobs"]
@@ -2475,7 +2486,7 @@ def grpo_train(
                         logprobs_policy=train_data["prev_logprobs"],
                         logprobs_reference=train_data.get("reference_policy_logprobs"),
                     )
-                    if "confidence_actor_weight" in train_data:
+                    if confidence_experiment and "confidence_actor_weight" in train_data:
                         from confidence_experiment import log_retained_advantages
 
                         retained_stats = log_retained_advantages(train_data, prompt_ids_for_adv, rewards)

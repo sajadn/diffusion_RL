@@ -54,7 +54,9 @@ Filtering and weighting act on the corrected actor gradient. Group advantages
 are computed from the original reward groups and are not recomputed after
 filtering. Logging reports retained signs, effective sample size, and support.
 The base correction has no dependency on `confidence_experiment` when that
-optional config section and its environment variables are absent.
+optional config section is absent, even if an experiment directory remains in
+the environment. Experiment startup and weighting require both an active
+`type: trace_grpo` estimator and `confidence_transition_correction: true`.
 
 ## Runtime helpers
 
@@ -77,14 +79,26 @@ git apply /path/to/RL-posanchor/tools/nemotron_diffusion/patches/vllm_confidence
 ```
 
 The existing experiment runtime already contains both patches. Do not apply
-them twice. No decoder probability calculation is changed by the hook patch;
-it records the logits and canvas transitions needed by the mitigation arms.
+them twice. The hook patch now includes separate sampler capture flags; a
+checkout with the older environment-only hook patch must replace that patch
+before using this version of the training integration. No decoder probability
+calculation is changed by the hook patch; it records the logits and canvas
+transitions needed by the mitigation arms.
 
-`confidence_audit_hooks.py` is an optional diagnostic recorder, enabled with
-`NRL_CONFIDENCE_AUDIT_DIR` in both rollout and Megatron worker environments.
+`confidence_audit_hooks.py` is an optional diagnostic recorder for an active
+corrected Trace config, requested with `NRL_CONFIDENCE_AUDIT_DIR` in both rollout
+and Megatron worker environments.
 Include this directory and the repository root on both workers' `PYTHONPATH`.
 It captures paired transition probabilities and top-token values for the
 confidence-0.9 audit; it does not change the objective.
+
+The training setup derives `record_confidence_experiment` and
+`record_confidence_audit` in the vLLM diffusion config independently. Directory
+variables never activate sampler imports by themselves. Inactive estimators
+remove inherited capture flags; ordinary vLLM configs gain no custom fields.
+Separate validation engines disable capture. Shared-engine capture skips
+validation policy/temperature changes outside confidence-0.9/T=1 and skips
+per-request greedy rows.
 
 ## Verification
 
@@ -92,6 +106,7 @@ From the repository, in the established environment:
 
 ```bash
 uv run --no-sync python -m pytest --confcutdir=tests/unit/algorithms \
+  tests/unit/algorithms/test_confidence_config.py \
   tests/unit/algorithms/test_confidence_transition.py \
   tests/unit/algorithms/test_confidence_experiment.py \
   tests/unit/algorithms/test_trace_first_step_reveal.py -o addopts= -q
@@ -100,4 +115,7 @@ uv run --no-sync python -m pytest --confcutdir=tests/unit/algorithms \
 Tests enumerate transition probabilities and check normalization, finite-
 difference gradients, fallback ties, unsupported events, post-EOS actor
 replacement, actor weights, record alignment, and first-step-only reveals.
-The full-vocabulary CUDA backward test is skipped when no GPU is available.
+Isolation tests also cover omitted/null estimators, stale diagnostic variables,
+inherited capture flags, and independent experiment/audit activation. The vLLM
+patch includes hook-import and validation-switch tests. The full-vocabulary
+CUDA backward test is skipped when no GPU is available.
