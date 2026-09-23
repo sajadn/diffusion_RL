@@ -13,6 +13,17 @@ policy:
 
 env:
   nemo_gym:
+    # Bound reasoning-only continuations to prevent unbounded model calls
+    # (NVIDIA-NeMo/Gym#3138). Coding allows up to five calls; verification
+    # still happens after generation and provides no feedback between calls.
+    code_gen_simple_agent:
+      responses_api_agents:
+        simple_agent:
+          max_steps: 5
+    math_with_judge_simple_agent:
+      responses_api_agents:
+        simple_agent:
+          max_steps: 1
     config_paths:
       - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
       - resources_servers/math_with_judge/configs/math_with_judge.yaml
