@@ -23,7 +23,12 @@ from just_grpo.algorithms.block_just_grpo import (
 )
 from unittest.mock import Mock
 
+from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+
 pytest.importorskip("megatron.bridge")
+from just_grpo.algorithms.block_just_grpo_policy_worker import (
+    BlockJustGRPOPolicyWorkerImpl,
+)
 from just_grpo.diffusion.megatron_diffusion_policy import (
     MegatronDiffusionPolicyWorkerImpl,
 )
@@ -243,8 +248,18 @@ def test_standard_forward_and_diffusion_processors_match_core_loss(
     torch.testing.assert_close(actual_grad, expected_grad)
 
 
+def _keep_worker_data_on_cpu(monkeypatch):
+    move = BatchedDataDict.to
+    monkeypatch.setattr(
+        BatchedDataDict,
+        "to",
+        lambda self, device: self if device == "cuda" else move(self, device),
+    )
+
+
 @pytest.mark.parametrize("fraction", [1.0, 0.25])
 def test_worker_accumulates_levels_before_one_optimizer_step(monkeypatch, fraction):
+    _keep_worker_data_on_cpu(monkeypatch)
     data = confidence_batch()
     data["training_token_mask"] = select_low_confidence_tokens(
         data, fraction=fraction, block_size=4
@@ -253,8 +268,11 @@ def test_worker_accumulates_levels_before_one_optimizer_step(monkeypatch, fracti
     monkeypatch.setattr(parallel_state, "get_data_parallel_group", lambda: None)
     monkeypatch.setattr(torch.distributed, "all_reduce", lambda *a, **k: None)
     worker = Mock()
-    worker._schedule.return_value = schedule
-    worker.diffusion.max_generation_kl = 0.05
+    worker._build_schedule.return_value = schedule
+    worker.max_generation_kl = 0.05
+    expected_tokens = float(
+        (data.pop("training_token_mask") * data["sample_mask"][:, None]).sum()
+    )
     counts = {"tokens": 0.0, "sequences": 0.0}
 
     def accumulate(level):
@@ -275,14 +293,14 @@ def test_worker_accumulates_levels_before_one_optimizer_step(monkeypatch, fracti
 
     worker.train_microbatch.side_effect = accumulate
     worker.finish_train_step.side_effect = finish
-    result = MegatronDiffusionPolicyWorkerImpl.train(worker, data=data, loss_fn=Mock())
-    worker.begin_train_step.assert_called_once()
+    loss_fn = Mock()
+    result = MegatronDiffusionPolicyWorkerImpl.train(
+        worker, data=data, loss_fn=loss_fn, gbs=16, mbs=2
+    )
+    worker.begin_train_step.assert_called_once_with(loss_fn, gbs=16, mbs=2)
     assert worker.train_microbatch.call_count == schedule.num_steps
     worker.finish_train_step.assert_called_once_with()
     worker.abort_train_step.assert_not_called()
-    expected_tokens = float(
-        (data["training_token_mask"] * data["sample_mask"][:, None]).sum()
-    )
     assert counts["tokens"] == expected_tokens
     assert result["all_mb_metrics"]["global_valid_toks"] == [expected_tokens]
     assert result["all_mb_metrics"]["global_valid_seqs"] == [
@@ -293,11 +311,12 @@ def test_worker_accumulates_levels_before_one_optimizer_step(monkeypatch, fracti
 
 @pytest.mark.parametrize("failure", ["train_microbatch", "finish_train_step"])
 def test_training_failure_aborts_open_step(monkeypatch, failure):
+    _keep_worker_data_on_cpu(monkeypatch)
     data = confidence_batch()
     data["training_token_mask"] = data["token_mask"].bool()
     monkeypatch.setattr(parallel_state, "get_data_parallel_group", lambda: None)
     worker = Mock()
-    worker._schedule.return_value = make_schedule(data)
+    worker._build_schedule.return_value = make_schedule(data)
     getattr(worker, failure).side_effect = RuntimeError("training failed")
     with pytest.raises(RuntimeError, match="training failed"):
         MegatronDiffusionPolicyWorkerImpl.train(worker, data=data, loss_fn=Mock())
@@ -306,19 +325,55 @@ def test_training_failure_aborts_open_step(monkeypatch, failure):
         worker.finish_train_step.assert_not_called()
 
 
-@pytest.mark.parametrize("reference", [False, True])
-def test_worker_scoring_uses_schedule_and_native_reference_context(
-    monkeypatch, reference
+@pytest.mark.parametrize("kl", [0.08, float("nan")])
+def test_shared_worker_checks_generation_kl_over_schedule_targets(monkeypatch, kl):
+    _keep_worker_data_on_cpu(monkeypatch)
+    data = confidence_batch()
+    data["training_token_mask"] = select_low_confidence_tokens(
+        data, fraction=0.25, block_size=4
+    )
+    schedule = make_diffusion_schedule(data, 0.25)
+    selected_tokens = float(data.pop("training_token_mask").sum())
+    monkeypatch.setattr(parallel_state, "get_data_parallel_group", lambda: None)
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda *a, **k: None)
+    worker = Mock()
+    worker._build_schedule.return_value = schedule
+    worker.max_generation_kl = 0.05
+    worker.finish_train_step.return_value = {
+        "all_mb_metrics": {
+            "gen_kl_error": [kl],
+            "global_valid_toks": [selected_tokens],
+            "global_valid_seqs": [float(data.size * schedule.num_steps)],
+        }
+    }
+    with pytest.raises(RuntimeError, match="Generation/training KL exceeds limit"):
+        MegatronDiffusionPolicyWorkerImpl.train(worker, data=data, loss_fn=Mock())
+
+
+@pytest.mark.parametrize("fraction", [1.0, 0.25])
+@pytest.mark.parametrize("mode", ["policy-replay", "policy-no-replay", "reference"])
+def test_scoring_coverage_depends_on_policy_role_not_router_replay(
+    monkeypatch, fraction, mode
 ):
     from contextlib import contextmanager
+    from types import SimpleNamespace
     from nemo_rl.models.policy.workers.megatron_policy_worker import (
         MegatronPolicyWorkerImpl,
     )
 
     data = confidence_batch()
-    schedule = make_schedule(data)
-    worker = object.__new__(MegatronDiffusionPolicyWorkerImpl)
-    worker._schedule = Mock(return_value=schedule)
+    worker = object.__new__(BlockJustGRPOPolicyWorkerImpl)
+    worker.just_grpo = SimpleNamespace(
+        training_token_fraction=fraction, schedule=make_schedule(data).config
+    )
+    worker.cfg = {"max_total_sequence_length": data["input_ids"].shape[1]}
+    worker.tokenizer = SimpleNamespace(pad_token_id=0)
+    _keep_worker_data_on_cpu(monkeypatch)
+    reference = mode == "reference"
+    replay = mode == "policy-replay"
+    expected_mask = select_low_confidence_tokens(
+        data, fraction=fraction if reference else 1.0, block_size=4
+    )
     active = []
     calls = []
 
@@ -332,36 +387,39 @@ def test_worker_scoring_uses_schedule_and_native_reference_context(
 
     worker.use_reference_model = reference_weights
 
-    def score(self, *, data, **kwargs):
+    def score(self, *, data, micro_batch_size, require_router_replay):
         assert bool(active) == reference
+        assert require_router_replay is replay
+        assert micro_batch_size == 1
         calls.append(data)
         return {"logprobs": data["target_ids"].float()}
 
     monkeypatch.setattr(MegatronPolicyWorkerImpl, "get_logprobs", score)
     result = (
-        worker.get_reference_policy_logprobs(data=data)["reference_logprobs"]
+        worker.get_reference_policy_logprobs(data=data, micro_batch_size=1)[
+            "reference_logprobs"
+        ]
         if reference
-        else worker.get_logprobs(data=data)["logprobs"]
+        else worker.get_logprobs(
+            data=data, micro_batch_size=1, require_router_replay=replay
+        )["logprobs"]
     )
-    assert len(calls) == schedule.num_steps
+    assert len(calls) == (1 if reference and fraction < 1 else 4)
     assert not active
-    torch.testing.assert_close(result, data["input_ids"].float() * data["token_mask"])
+    torch.testing.assert_close(result, data["input_ids"].float() * expected_mask)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="Megatron worker schedules use CUDA"
-)
 def test_worker_preserves_fixed_model_canvas_for_short_rollouts():
     from types import SimpleNamespace
 
     data = confidence_batch()
-    worker = object.__new__(MegatronDiffusionPolicyWorkerImpl)
-    worker.diffusion = SimpleNamespace(
+    worker = object.__new__(BlockJustGRPOPolicyWorkerImpl)
+    worker.just_grpo = SimpleNamespace(
         training_token_fraction=0.25, schedule=make_schedule(data).config
     )
     worker.cfg = {"max_total_sequence_length": 32}
     worker.tokenizer = SimpleNamespace(pad_token_id=0)
-    schedule = worker._schedule(data)
+    schedule = worker._build_schedule(data, purpose="train")
     assert schedule.base["input_ids"].shape == (data.size, 32)
     assert schedule.num_steps == 1
     assert not schedule.base["token_mask"][:, data["input_ids"].shape[1] :].any()

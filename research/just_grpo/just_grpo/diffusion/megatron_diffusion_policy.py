@@ -11,58 +11,59 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Native Megatron worker with a diffusion schedule and postprocessors."""
+"""Shared Megatron execution for caller-supplied diffusion schedules."""
 
-import math
 from functools import partial
 from typing import Any
 
-import ray
 import torch
 from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 from megatron.core import parallel_state
-from omegaconf import OmegaConf
 from transformers import AutoConfig
 
-from just_grpo.algorithms.block_just_grpo import (
-    BlockJustGRPOSchedule,
-    select_low_confidence_tokens,
+from just_grpo.diffusion.config import DiffusionSamplingParams
+from just_grpo.diffusion.denoising_schedule import (
+    DenoisingSchedule,
+    SchedulePurpose,
+    aggregate_diffusion_logprobs,
 )
-from just_grpo.config import JustGRPOConfig
-from just_grpo.diffusion.denoising_schedule import aggregate_diffusion_logprobs
 from just_grpo.diffusion.diffusion_processors import (
     DiffusionLogprobsPostProcessor,
     DiffusionLossPostProcessor,
     prepare_diffusion_microbatch,
 )
 from just_grpo.generation.megatron_generation import generate_responses, pack_responses
-from nemo_rl.algorithms.loss import ClippedPGLossFn
+from nemo_rl.algorithms.loss.interfaces import LossFunction
 from nemo_rl.data.interfaces import TokenizerType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.models.megatron.train import model_forward
 from nemo_rl.models.policy import PolicyConfig
-from nemo_rl.models.policy.utils import get_runtime_env_for_policy_worker
 from nemo_rl.models.policy.workers.megatron_policy_worker import (
     MegatronPolicyWorkerImpl,
 )
 
 
 class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
-    """Keep the native worker lifecycle; specialize only diffusion execution."""
+    """Execute diffusion schedules using the native worker lifecycle."""
 
     def __init__(
-        self, config: PolicyConfig, tokenizer: TokenizerType, **kwargs: Any
+        self,
+        config: PolicyConfig,
+        tokenizer: TokenizerType,
+        *,
+        mask_token_id: int,
+        block_size: int,
+        sampling: DiffusionSamplingParams,
+        generation_seed: int,
+        max_generation_kl: float,
+        **kwargs: Any,
     ) -> None:
-        self.research_config = OmegaConf.create(config.pop("diffusion_config"))
-        self.diffusion = JustGRPOConfig.model_validate(
-            OmegaConf.to_container(self.research_config.just_grpo, resolve=True)
-        )
         # Register the trusted configuration class before Bridge reads the checkpoint.
         hf_config = AutoConfig.from_pretrained(
             config["model_name"], trust_remote_code=True
         )
         if hf_config.model_type != "nemotron_labs_diffusion":
-            raise ValueError("JustGRPO requires Nemotron Labs Diffusion")
+            raise ValueError("Diffusion worker requires Nemotron Labs Diffusion")
         if (
             2 * config["max_total_sequence_length"]
             > hf_config.rope_parameters["original_max_position_embeddings"]
@@ -73,41 +74,32 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
         register_allowed_target_prefix(type(hf_config).__module__ + ".")
         config["megatron_cfg"]["model_overrides"] = {
             "seq_length": config["max_total_sequence_length"],
-            "block_size": self.diffusion.schedule.block_size,
+            "block_size": block_size,
         }
         super().__init__(
             config,
             tokenizer,
             prepare_microbatch_fn=partial(
                 prepare_diffusion_microbatch,
-                mask_token_id=self.diffusion.schedule.mask_token_id,
+                mask_token_id=mask_token_id,
             ),
             loss_postprocessor_factory=DiffusionLossPostProcessor,
             logprobs_postprocessor_factory=DiffusionLogprobsPostProcessor,
             **kwargs,
         )
-        self.generation_index = 0
         self.generation_vocab_size = hf_config.vocab_size
+        self.mask_token_id = mask_token_id
+        self.sampling = sampling
+        self.generation_seed = generation_seed
+        self.max_generation_kl = max_generation_kl
+        self.generation_index = 0
 
-    def _schedule(
-        self, data: BatchedDataDict[Any], *, selected: bool = True
-    ) -> BlockJustGRPOSchedule:
-        data.to("cuda")
-        fraction = self.diffusion.training_token_fraction if selected else 1.0
-        data["training_token_mask"] = select_low_confidence_tokens(
-            data,
-            fraction=fraction,
-            block_size=self.diffusion.schedule.block_size,
-        )
-        block = self.diffusion.schedule.block_size
-        return BlockJustGRPOSchedule(
-            data,
-            self.diffusion.schedule,
-            pad_token_id=self.tokenizer.pad_token_id,
-            padded_width=self.cfg["max_total_sequence_length"],
-            selected_positions_per_block=math.ceil(fraction * block)
-            if fraction < 1
-            else None,
+    def _build_schedule(
+        self, data: BatchedDataDict[Any], *, purpose: SchedulePurpose
+    ) -> DenoisingSchedule:
+        """Build an algorithm schedule for policy scoring, reference scoring, or training."""
+        raise NotImplementedError(
+            "Diffusion algorithms must provide a denoising schedule"
         )
 
     def get_logprobs(
@@ -117,8 +109,41 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
         micro_batch_size: int | None = None,
         require_router_replay: bool = True,
     ) -> BatchedDataDict[Any]:
-        # Reference scoring enters this method inside the native reference context.
-        schedule = self._schedule(data, selected=not require_router_replay)
+        """Score the policy schedule; router replay does not choose coverage."""
+        data.to("cuda")
+        return self._get_schedule_logprobs(
+            data=data,
+            schedule=self._build_schedule(data, purpose="policy"),
+            micro_batch_size=micro_batch_size,
+            require_router_replay=require_router_replay,
+        )
+
+    def get_reference_policy_logprobs(
+        self,
+        *,
+        data: BatchedDataDict[Any],
+        micro_batch_size: int | None = None,
+    ) -> BatchedDataDict[Any]:
+        """Score the reference schedule with reference weights across all levels."""
+        data.to("cuda")
+        with self.use_reference_model():
+            scores = self._get_schedule_logprobs(
+                data=data,
+                schedule=self._build_schedule(data, purpose="reference"),
+                micro_batch_size=micro_batch_size,
+                require_router_replay=False,
+            )
+        return BatchedDataDict(reference_logprobs=scores["logprobs"])
+
+    def _get_schedule_logprobs(
+        self,
+        *,
+        data: BatchedDataDict[Any],
+        schedule: DenoisingSchedule,
+        micro_batch_size: int | None = None,
+        require_router_replay: bool = True,
+    ) -> BatchedDataDict[Any]:
+        """Score exactly the supplied schedule, independent of router replay."""
 
         def score(level: BatchedDataDict[Any]) -> torch.Tensor:
             return super(MegatronDiffusionPolicyWorkerImpl, self).get_logprobs(
@@ -139,19 +164,24 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
         self,
         *,
         data: BatchedDataDict[Any],
-        loss_fn: ClippedPGLossFn,
+        loss_fn: LossFunction,
         eval_mode: bool = False,
         gbs: int | None = None,
         mbs: int | None = None,
         check_dim_skip_keys: Any = None,
     ) -> dict[str, Any]:
+        """Accumulate all schedule levels before one optimizer update."""
         if eval_mode:
             raise ValueError("Use get_logprobs for diffusion scoring")
-        schedule = self._schedule(data)
-        self.begin_train_step(loss_fn)
+        data.to("cuda")
+        schedule = self._build_schedule(data, purpose="train")
+        local_tokens = torch.zeros((), device=data["input_ids"].device)
+        self.begin_train_step(loss_fn, gbs=gbs, mbs=mbs)
         try:
-            # Preserve the full response mask in the schedule for conditioning.
             for level in schedule.iter_levels(data):
+                local_tokens += (
+                    level["token_mask"] * level["sample_mask"][:, None]
+                ).sum()
                 self.train_microbatch(level)
             result = self.finish_train_step()
         except Exception:
@@ -165,9 +195,6 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
             count / schedule.num_steps
             for count in result["all_mb_metrics"]["global_valid_seqs"]
         ]
-        local_tokens = (
-            data["training_token_mask"] * data["sample_mask"][:, None]
-        ).sum()
         kl = (
             sum(result["all_mb_metrics"]["gen_kl_error"])
             * result["all_mb_metrics"]["global_valid_toks"][0]
@@ -178,7 +205,7 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
             op=torch.distributed.ReduceOp.MAX,
             group=parallel_state.get_data_parallel_group(),
         )
-        if not torch.isfinite(kl) or kl > self.diffusion.max_generation_kl:
+        if not torch.isfinite(kl) or kl > self.max_generation_kl:
             raise RuntimeError(f"Generation/training KL exceeds limit: {float(kl)}")
         return result
 
@@ -187,7 +214,7 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
         self, *, data: BatchedDataDict[Any], greedy: bool = False
     ) -> BatchedDataDict[Any]:
         if (
-            self.diffusion.runtime != "megatron"
+            self.cfg["generation"]["backend"] != "megatron"
             or parallel_state.get_tensor_model_parallel_world_size() != 1
         ):
             raise ValueError(
@@ -197,7 +224,7 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
             row[: int(length)].tolist()
             for row, length in zip(data["input_ids"], data["input_lengths"])
         ]
-        sampling = self.diffusion.sampling.model_copy()
+        sampling = self.sampling.model_copy()
         if greedy:
             sampling.temperature = 0.0
         generation = self.cfg["generation"]
@@ -226,9 +253,9 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
             sampling=sampling,
             max_new_tokens=generation["max_new_tokens"],
             max_sequence_length=self.cfg["max_total_sequence_length"],
-            mask_token_id=self.diffusion.schedule.mask_token_id,
+            mask_token_id=self.mask_token_id,
             stop_token_ids=stop,
-            seed=self.research_config.grpo.seed
+            seed=self.generation_seed
             + parallel_state.get_data_parallel_rank()
             + self.generation_index * parallel_state.get_data_parallel_world_size(),
         )
@@ -240,8 +267,3 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
             max_new_tokens=generation["max_new_tokens"],
             stop_token_ids=stop,
         )
-
-
-@ray.remote(runtime_env=get_runtime_env_for_policy_worker("megatron_policy_worker"))
-class MegatronDiffusionPolicyWorker(MegatronDiffusionPolicyWorkerImpl):
-    pass

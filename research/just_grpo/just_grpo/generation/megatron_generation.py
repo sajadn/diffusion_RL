@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 import ray
 import torch
 
-from just_grpo.config import DiffusionSamplingParams
+from just_grpo.diffusion.config import DiffusionSamplingParams
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.models.generation.megatron.megatron_generation import MegatronGeneration
 

@@ -2,6 +2,49 @@
 
 The research driver supports Megatron training with reference vLLM or in-process Megatron generation. The earlier Transformers training adapter and its verification-only worker have been removed. Historical artifacts remain in their original run directories and Git history.
 
+## Shared diffusion worker API (2026-09-28)
+
+The algorithm worker now only parses JustGRPO configuration and implements
+`_build_schedule(data, purpose=...)`. Policy/reference scoring, reference-weight
+handling, training, metric normalization, the generation-KL check, and generation
+are inherited from the shared diffusion worker. The KL denominator is counted
+from schedule targets, without reading JustGRPO's `training_token_mask` field.
+Shared sampling parameters live in `diffusion/config.py`.
+
+The CPU suite command below again passed **128 tests, with 3 optional-dependency
+skips**. Thirteen isolated worker contract cases passed with the native Megatron
+backend stubbed: coverage with/without router replay, reference context, gradient
+accumulation/abort, sparse-target KL checks, and fixed canvas width. As below,
+these execute production class bodies but do not verify GPU imports or execution.
+Ruff check/format and `git diff --check` passed. No GPU job was submitted.
+
+## Schedule ownership and scoring coverage (2026-09-28)
+
+`BlockJustGRPOPolicyWorker` now owns schedule construction, Fast selection,
+algorithm configuration, and leftmost generation. The shared diffusion worker
+executes caller-supplied schedules. Previous-policy scoring covers all response
+tokens with either value of `require_router_replay`; reference scoring explicitly
+selects the training targets. `seq-mask-tis` is rejected at configuration validation.
+
+Validation command (with the provisioned CPU environment and research package on
+`PYTHONPATH`):
+
+```bash
+uv run --no-cache --no-project --python "$POLICY_PYTHON" python -m pytest \
+  research/just_grpo/tests/unit -q -p no:cacheprovider \
+  --confcutdir=research/just_grpo/tests
+```
+
+Result: **128 passed, 3 skipped**. The skips cover the Megatron adapter module
+(Megatron Bridge unavailable) and two optional-dependency integration cases.
+Ruff check, Ruff format check, and `git diff --check` passed for the changed files.
+
+The six policy/reference coverage cases and four schedule accumulation/abort cases
+were also executed by loading the production class bodies and checked-in test
+functions with native Megatron scoring stubbed. All ten passed. This isolates the
+worker contract from unavailable GPU dependencies; it does not verify full module
+imports, Ray actor construction, or GPU execution. No training job was submitted.
+
 ## Normalization and recipe cleanup (2026-09-24)
 
 Training now uses native streaming token-mask counts, without a

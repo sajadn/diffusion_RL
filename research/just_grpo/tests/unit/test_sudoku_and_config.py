@@ -130,6 +130,10 @@ def test_validation_inherits_training_decoder(tmp_path):
         ({"checkpointing": {"enabled": True}}, "Resumable checkpointing"),
         ({"loss_fn": {"use_kl_in_reward": True}}, "reward-side KL"),
         ({"loss_fn": {"force_on_policy_ratio": True}}, "recomputed prev_logprobs"),
+        (
+            {"loss_fn": {"truncated_importance_sampling_type": "seq-mask-tis"}},
+            "seq-mask-tis requires whole-response filtering",
+        ),
         ({"just_grpo": {"old_logprobs": "generation"}}, "Extra inputs"),
         ({"policy": {"train_global_batch_size": 1}}, "one global optimizer update"),
     ],

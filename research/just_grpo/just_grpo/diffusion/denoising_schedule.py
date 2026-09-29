@@ -15,11 +15,14 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
+
+
+SchedulePurpose = Literal["policy", "reference", "train"]
 
 
 class DenoisingSchedule(ABC):

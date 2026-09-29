@@ -15,7 +15,7 @@ loss_fn:
   truncated_importance_sampling_type: tis
   truncated_importance_sampling_ratio: 2.0
 policy:
-  worker_extension_cls_fqn: just_grpo.diffusion.megatron_diffusion_policy.MegatronDiffusionPolicyWorker
+  worker_extension_cls_fqn: just_grpo.algorithms.block_just_grpo_policy_worker.BlockJustGRPOPolicyWorker
   model_name: nvidia/Nemotron-Labs-Diffusion-3B
   train_global_batch_size: ${mul:${grpo.num_prompts_per_step},${grpo.num_generations_per_prompt}}
   max_total_sequence_length: 1536

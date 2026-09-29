@@ -18,15 +18,7 @@ from typing import Literal, Self
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field, model_validator
 
-
-class DiffusionSamplingParams(BaseModel, extra="allow"):
-    temperature: float = Field(ge=0)
-    block_size: int = Field(gt=0)
-    max_steps: int = Field(gt=0)
-    selection_policy: Literal["leftmost", "confidence_threshold"]
-    threshold: float = Field(gt=0, lt=1)
-    returns_reveal_steps: bool
-    returns_entropy: bool
+from just_grpo.diffusion.config import DiffusionSamplingParams
 
 
 class ScheduleConfig(BaseModel, extra="allow"):
@@ -244,6 +236,10 @@ def validate_config(config: "DictConfig") -> JustGRPOConfig:
     ):
         raise ValueError(
             "The research worker requires token-level loss without reward-side KL, sequence ratios, or auxiliary NLL"
+        )
+    if loss.truncated_importance_sampling_type == "seq-mask-tis":
+        raise ValueError(
+            "seq-mask-tis requires whole-response filtering and is unsupported by per-level diffusion training"
         )
     for split in (config.data.train, config.data.validation):
         if split.size <= 0 or split.repeat <= 0:
