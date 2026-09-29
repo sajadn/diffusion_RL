@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import ray
+import torch
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.worker_group_utils import get_nsight_config_if_pattern_matches
@@ -61,6 +62,33 @@ class _ReferenceDiffusionSampling:
         params.logprobs = 0
         params.top_k = -1
         return params
+
+    def _completion_metadata(
+        self,
+        completion: Any,
+        *,
+        input_length: int,
+        padded_length: int,
+    ) -> dict[str, torch.Tensor]:
+        diffusion = self.cfg["vllm_kwargs"]["diffusion_config"]
+        if not diffusion["return_reveal_steps"]:
+            return {}
+        recorded = completion.reveal_steps
+        if recorded is None or len(recorded) != len(completion.token_ids):
+            raise ValueError(
+                "Reference vLLM must return a reveal step per generated token"
+            )
+        steps = torch.full((padded_length,), -1, dtype=torch.long)
+        steps[input_length : input_length + len(recorded)] = torch.tensor(recorded)
+        tokens = list(completion.token_ids)
+        stop_ids = self.cfg["stop_token_ids"] or []
+        response_length = next(
+            (i + 1 for i, token in enumerate(tokens) if token in stop_ids), len(tokens)
+        )
+        return {
+            "reveal_steps": steps,
+            "response_lengths": torch.tensor(response_length),
+        }
 
     def _validate_context(self, data: BatchedDataDict[GenerationDatumSpec]) -> None:
         diffusion = self.cfg["vllm_kwargs"]["diffusion_config"]

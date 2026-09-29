@@ -617,7 +617,10 @@ def generate_responses(
         input_len = input_lengths[i].item()
         total_length = unpadded_sequence_lengths[i].item()
         full_output = output_ids[i]
-        generated_part = full_output[input_len:total_length]
+        text_end = total_length
+        if "response_lengths" in generation_outputs:
+            text_end = input_len + int(generation_outputs["response_lengths"][i])
+        generated_part = full_output[input_len:text_end]
         generated_ids.append(generated_part)
 
     generated_texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
@@ -634,6 +637,10 @@ def generate_responses(
 
         if include_logprobs and "logprobs" in generation_outputs:
             assistant_message["generation_logprobs"] = generation_outputs["logprobs"][
+                i, input_length:total_length
+            ]
+        if "reveal_steps" in generation_outputs:
+            assistant_message["reveal_steps"] = generation_outputs["reveal_steps"][
                 i, input_length:total_length
             ]
         if "routed_experts" in generation_outputs:
@@ -758,7 +765,10 @@ async def generate_responses_async(
         input_len = input_lengths[i].item()
         total_length = unpadded_sequence_lengths[i].item()
         full_output = output_ids[i]
-        generated_part = full_output[input_len:total_length]
+        text_end = total_length
+        if "response_lengths" in generation_outputs:
+            text_end = input_len + int(generation_outputs["response_lengths"][i])
+        generated_part = full_output[input_len:text_end]
         generated_ids.append(generated_part)
 
     generated_texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
@@ -775,6 +785,10 @@ async def generate_responses_async(
 
         if include_logprobs and "logprobs" in generation_outputs:
             assistant_message["generation_logprobs"] = generation_outputs["logprobs"][
+                i, input_length:total_length
+            ]
+        if "reveal_steps" in generation_outputs:
+            assistant_message["reveal_steps"] = generation_outputs["reveal_steps"][
                 i, input_length:total_length
             ]
         if "routed_experts" in generation_outputs:

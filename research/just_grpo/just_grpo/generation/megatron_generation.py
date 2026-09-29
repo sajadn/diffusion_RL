@@ -150,6 +150,10 @@ def sample_batch(
     can only read their own noisy block and earlier clean blocks. Unknown
     future blocks remain MASK. Returned scores are measured at commitment.
     """
+    if sampling.selection_policy not in ("leftmost", "confidence_threshold"):
+        raise ValueError(
+            "Megatron generation supports leftmost or confidence_threshold selection"
+        )
     block = sampling.block_size
     if prompts.ndim != 2 or prompts.shape[1] == 0 or prompts.shape[1] % block:
         raise ValueError("Require nonempty block-aligned prompts")
@@ -160,8 +164,8 @@ def sample_batch(
         or prompts.shape[1] + max_new_tokens > max_sequence_length
     ):
         raise ValueError("Prompt plus response canvas exceeds aligned context length")
-    if sampling.selection_policy != "leftmost" or block % sampling.max_steps:
-        raise ValueError("Megatron generation requires a divisible leftmost schedule")
+    if sampling.selection_policy == "leftmost" and block % sampling.max_steps:
+        raise ValueError("Megatron leftmost generation requires a divisible schedule")
     batch, prefix = prompts.shape
     tokens = torch.full(
         (batch, max_sequence_length),
@@ -170,52 +174,94 @@ def sample_batch(
         dtype=torch.long,
     )
     tokens[:, :prefix] = prompts
-    positions = torch.arange(max_sequence_length, device=prompts.device)[
-        None
-    ].expand_as(tokens)
-    positions = positions.repeat(1, 2)
+    positions = (
+        torch.arange(max_sequence_length, device=prompts.device)[None]
+        .expand_as(tokens)
+        .repeat(1, 2)
+    )
     scores = torch.zeros(
         (batch, max_new_tokens), device=prompts.device, dtype=torch.float32
+    )
+    reveal_steps = torch.full(
+        (batch, max_new_tokens), -1, device=prompts.device, dtype=torch.long
     )
     finished = torch.zeros(batch, device=prompts.device, dtype=torch.bool)
     lengths = torch.full(
         (batch,), max_new_tokens, device=prompts.device, dtype=torch.long
     )
+    retained_lengths = lengths.clone()
     stops = torch.tensor(stop_token_ids, device=prompts.device, dtype=torch.long)
-    reveal_width = block // sampling.max_steps
-    for offset in range(0, max_new_tokens, reveal_width):
-        start, end = prefix + offset, prefix + offset + reveal_width
-        # The attention implementation owns the asymmetric block mask. Keep
-        # its fixed width even when the current prefix is short.
-        logits = forward(torch.cat([tokens, tokens], dim=1), positions)
-        candidates, logprobs = sample_tokens(
-            logits[:, start:end], temperature=sampling.temperature, generator=generator
-        )
-        del logits
-        active = ~finished
-        tokens[:, start:end] = torch.where(
-            active[:, None], candidates, tokens[:, start:end]
-        )
-        scores[:, offset : offset + reveal_width] = torch.where(
-            active[:, None], logprobs, 0.0
-        )
-        hits = torch.isin(candidates, stops) & active[:, None]
-        ended = hits.any(-1)
-        first_stop = hits.long().argmax(-1)
-        lengths = torch.where(ended, offset + first_stop + 1, lengths)
-        finished |= ended
+    offsets = torch.arange(block, device=prompts.device)[None]
+    for block_start in range(0, max_new_tokens, block):
+        block_end = block_start + block
+        committed = torch.zeros((batch, block), device=prompts.device, dtype=torch.bool)
+        active_rows = ~finished
+        for step in range(sampling.max_steps):
+            eligible = ~committed & active_rows[:, None]
+            eligible &= (block_start + offsets) < lengths[:, None]
+            if not eligible.any():
+                break
+            logits = forward(torch.cat([tokens, tokens], dim=1), positions)
+            if sampling.selection_policy == "leftmost":
+                width = block // sampling.max_steps
+                lo, hi = step * width, (step + 1) * width
+            else:
+                lo, hi = 0, block
+            candidates, logprobs = sample_tokens(
+                logits[:, prefix + block_start + lo : prefix + block_start + hi],
+                temperature=sampling.temperature,
+                generator=generator,
+            )
+            del logits
+            selection = eligible[:, lo:hi]
+            if (
+                sampling.selection_policy == "confidence_threshold"
+                and step + 1 < sampling.max_steps
+            ):
+                confidence = logprobs.exp().masked_fill(~selection, -1)
+                best = confidence.argmax(-1, keepdim=True)
+                take = confidence >= sampling.threshold
+                take.scatter_(1, best, True)
+                selection = selection & take
+            target_slice = slice(prefix + block_start + lo, prefix + block_start + hi)
+            tokens[:, target_slice] = torch.where(
+                selection, candidates, tokens[:, target_slice]
+            )
+            score_slice = slice(block_start + lo, block_start + hi)
+            scores[:, score_slice] = torch.where(
+                selection, logprobs, scores[:, score_slice]
+            )
+            reveal_steps[:, score_slice] = torch.where(
+                selection, step, reveal_steps[:, score_slice]
+            )
+            committed[:, lo:hi] |= selection
+            hits = torch.isin(candidates, stops) & selection
+            stop_positions = block_start + offsets[:, lo:hi] + 1
+            first_stop = (
+                torch.where(hits, stop_positions, max_new_tokens + 1).min(-1).values
+            )
+            lengths = torch.minimum(lengths, first_stop)
+            ended = hits.any(-1)
+            finished |= ended
+            retained_lengths = torch.where(ended, block_end, retained_lengths)
+            # Fill any still-masked positions preceding an out-of-order stop.
+            if sampling.selection_policy == "leftmost":
+                active_rows &= ~ended
         if finished.all():
             break
-    return [
-        {
-            "token_ids": row[prefix : prefix + length].tolist(),
-            "logprobs": row_scores[:length].tolist(),
-            "finish_reason": "stop" if done else "length",
+    returned_lengths = retained_lengths if sampling.emit_full_blocks else lengths
+    responses = []
+    for row, length in enumerate(returned_lengths.tolist()):
+        response = {
+            "token_ids": tokens[row, prefix : prefix + length].tolist(),
+            "logprobs": scores[row, :length].tolist(),
+            "finish_reason": "stop" if bool(finished[row]) else "length",
         }
-        for row, row_scores, length, done in zip(
-            tokens, scores, lengths.tolist(), finished.tolist()
-        )
-    ]
+        if sampling.returns_reveal_steps:
+            response["reveal_steps"] = reveal_steps[row, :length].tolist()
+            response["response_length"] = int(lengths[row])
+        responses.append(response)
+    return responses
 
 
 @torch.no_grad()
@@ -284,12 +330,26 @@ def pack_responses(
         logprobs[i, len(prompt) : lengths[i]] = torch.tensor(scores)
         generated.append(len(tokens))
         truncated.append(
-            len(tokens) >= max_new_tokens and tokens[-1] not in stop_token_ids
+            len(tokens) >= max_new_tokens
+            and not any(token in stop_token_ids for token in tokens)
         )
-    return BatchedDataDict(
+    result = BatchedDataDict(
         output_ids=ids,
         logprobs=logprobs,
         generation_lengths=torch.tensor(generated),
         unpadded_sequence_lengths=torch.tensor(lengths),
         truncated=torch.tensor(truncated),
     )
+
+    if any("reveal_steps" in response for response in responses):
+        steps = torch.full_like(ids, -1)
+        semantic_lengths = []
+        for i, (prompt, response) in enumerate(zip(prompts, responses)):
+            recorded = response["reveal_steps"]
+            if len(recorded) != len(response["token_ids"]):
+                raise ValueError("Reveal steps must align with generated tokens")
+            steps[i, len(prompt) : lengths[i]] = torch.tensor(recorded)
+            semantic_lengths.append(response["response_length"])
+        result["reveal_steps"] = steps
+        result["response_lengths"] = torch.tensor(semantic_lengths)
+    return result

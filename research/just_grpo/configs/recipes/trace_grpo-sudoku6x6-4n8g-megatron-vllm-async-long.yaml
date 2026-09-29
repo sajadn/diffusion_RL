@@ -1,0 +1,18 @@
+defaults: ./trace_grpo-sudoku6x6-4n8g-megatron-vllm-long.yaml
+grpo:
+  async_grpo:
+    enabled: true
+policy:
+  generation:
+    worker_extension_cls_fqn: just_grpo.generation.reference_vllm.ReferenceVllmAsyncWorker
+    colocated:
+      enabled: false
+      resources:
+        num_nodes: 2
+        gpus_per_node: 8
+    vllm_cfg:
+      async_engine: true
+logger:
+  log_dir: results/trace_grpo_sudoku6x6_vllm_async
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,trace_grpo_sudoku6x6_vllm_async}

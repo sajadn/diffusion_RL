@@ -22,7 +22,27 @@ class DiffusionSamplingParams(BaseModel, extra="allow"):
     temperature: float = Field(ge=0)
     block_size: int = Field(gt=0)
     max_steps: int = Field(gt=0)
-    selection_policy: Literal["leftmost", "confidence_threshold"]
+    selection_policy: Literal[
+        "leftmost", "confidence_threshold", "random", "entropy", "low_confidence"
+    ]
     threshold: float = Field(gt=0, lt=1)
     returns_reveal_steps: bool
     returns_entropy: bool
+    emit_full_blocks: bool | None = None
+
+
+class BlockDiffusionConfig(BaseModel):
+    mask_token_id: int
+    block_size: int = Field(gt=0)
+
+
+class DiffusionExperimentConfig(BaseModel, extra="forbid"):
+    """Backend and decoding settings shared by diffusion GRPO algorithms."""
+
+    schedule: BlockDiffusionConfig
+    runtime: Literal["reference_vllm", "megatron", "upstream_vllm", "upstream_sglang"]
+    generation_python: str | None
+    max_generation_kl: float = Field(ge=0)
+    distributed: bool
+    sampling: DiffusionSamplingParams
+    validation_sampling: DiffusionSamplingParams

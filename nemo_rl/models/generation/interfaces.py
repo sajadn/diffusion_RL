@@ -390,6 +390,12 @@ class GenerationOutputSpec(TypedDict):
     unpadded_sequence_lengths: (
         torch.Tensor
     )  # Length of full valid sequence (input + generated response)
+    reveal_steps: NotRequired[
+        torch.Tensor
+    ]  # [N,S] block-relative commit steps; -1 outside committed tokens.
+    response_lengths: NotRequired[
+        torch.Tensor
+    ]  # [N] semantic response length, excluding retained terminal-block context.
     logprobs: torch.Tensor
     routed_experts: NotRequired[torch.Tensor]
     r3_routed_experts_missing_routes: NotRequired[torch.Tensor]

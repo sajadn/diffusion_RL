@@ -23,7 +23,8 @@ import torch
 from omegaconf import DictConfig
 from torch.utils.data import Dataset
 
-from just_grpo.algorithms.block_just_grpo import align_prompt
+from just_grpo.diffusion.block_layout import align_prompt
+from just_grpo.config import get_diffusion_config
 from nemo_rl.data.interfaces import DatumSpec, LLMMessageLogType, TokenizerType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.environments.interfaces import EnvironmentInterface, EnvironmentReturn
@@ -108,6 +109,7 @@ class SudokuResponseDataset(Dataset):
         self, config: DictConfig, tokenizer: TokenizerType, *, validation: bool = False
     ) -> None:
         self.config = config
+        self.diffusion = get_diffusion_config(config)
         self.tokenizer = tokenizer
         split = config.data.validation if validation else config.data.train
         self.examples = SudokuDataset(
@@ -136,8 +138,8 @@ class SudokuResponseDataset(Dataset):
             raise ValueError("Sudoku prompt exceeds data.max_input_seq_length")
         tokens = align_prompt(
             tokens,
-            block_size=self.config.just_grpo.schedule.block_size,
-            mask_token_id=self.config.just_grpo.schedule.mask_token_id,
+            block_size=self.diffusion.schedule.block_size,
+            mask_token_id=self.diffusion.schedule.mask_token_id,
         )
         # One pretokenized message preserves exactly the reference chat template
         # and block alignment. Upstream rollouts consume these token IDs directly.

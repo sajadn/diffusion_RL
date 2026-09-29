@@ -785,6 +785,16 @@ class BaseVllmGenerationWorker:
 
         return list(stop_set) if stop_set else None
 
+    def _completion_metadata(
+        self,
+        completion: Any,
+        *,
+        input_length: int,
+        padded_length: int,
+    ) -> dict[str, torch.Tensor]:
+        """Return optional per-completion fields, aligned to the output sequence."""
+        return {}
+
     def _build_sampling_params(
         self,
         *,
@@ -1095,6 +1105,7 @@ class VllmGenerationWorkerImpl(VllmCheckpointEngineRpcMixin, BaseVllmGenerationW
         # Process the outputs - but preserve the original input padding structure
         output_ids_list = []
         logprobs_list = []
+        completion_metadata = []
         routed_experts_list = []
         r3_missing_routes = []
         r3_expected_routes = []
@@ -1131,6 +1142,13 @@ class VllmGenerationWorkerImpl(VllmCheckpointEngineRpcMixin, BaseVllmGenerationW
                 torch.tensor(generated_tokens)
             )
 
+            completion_metadata.append(
+                self._completion_metadata(
+                    generation,
+                    input_length=int(sequence_length),
+                    padded_length=total_length,
+                )
+            )
             output_ids_list.append(full_output)
             full_logprobs = torch.zeros(total_length, dtype=torch.float32)
             if hasattr(generation, "logprobs") and generation.logprobs:
@@ -1219,6 +1237,11 @@ class VllmGenerationWorkerImpl(VllmCheckpointEngineRpcMixin, BaseVllmGenerationW
                 "truncated": torch.tensor(truncated_list, dtype=torch.bool),
             }
         )
+        if completion_metadata:
+            for key in completion_metadata[0]:
+                return_data[key] = torch.stack(
+                    [item[key] for item in completion_metadata]
+                )
         if routed_experts_list:
             return_data["routed_experts"] = torch.stack(routed_experts_list)
         if r3_missing_routes:

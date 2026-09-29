@@ -1,0 +1,40 @@
+# Replay one sampled recorded denoising level per response and optimizer step.
+defaults: ./just_grpo-sudoku6x6-4n8g-megatron-inference-long.yaml
+just_grpo: null
+grpo:
+  seq_logprob_error_threshold: null
+policy:
+  worker_extension_cls_fqn: just_grpo.algorithms.trace_grpo_policy_worker.TraceGRPOPolicyWorker
+trace_grpo:
+  distributed: true
+  runtime: megatron
+  generation_python: null
+  max_generation_kl: 0.05
+  schedule:
+    mask_token_id: 100
+    block_size: 16
+    num_level_samples: 1
+    seed_base: 42
+    sampled_level_reduction: sum
+  sampling:
+    temperature: ${policy.generation.temperature}
+    block_size: ${trace_grpo.schedule.block_size}
+    max_steps: 16
+    selection_policy: confidence_threshold
+    threshold: 0.9
+    returns_reveal_steps: true
+    returns_entropy: false
+    emit_full_blocks: true
+  validation_sampling:
+    temperature: ${policy.generation.val_temperature}
+    block_size: ${trace_grpo.sampling.block_size}
+    max_steps: ${trace_grpo.sampling.max_steps}
+    selection_policy: ${trace_grpo.sampling.selection_policy}
+    threshold: ${trace_grpo.sampling.threshold}
+    returns_reveal_steps: ${trace_grpo.sampling.returns_reveal_steps}
+    returns_entropy: ${trace_grpo.sampling.returns_entropy}
+    emit_full_blocks: ${trace_grpo.sampling.emit_full_blocks}
+logger:
+  log_dir: results/trace_grpo_sudoku6x6_megatron
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,trace_grpo_sudoku6x6_megatron}

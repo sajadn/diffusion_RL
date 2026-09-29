@@ -138,3 +138,21 @@ def test_async_context_check_and_native_stream_delegation(monkeypatch, max_model
     else:
         assert asyncio.run(collect())[0][1] is batch
         assert called == [(batch, True)]
+
+
+@pytest.mark.parametrize(
+    "worker_cls", [ReferenceVllmWorkerImpl, ReferenceVllmAsyncWorkerImpl]
+)
+def test_reference_trace_metadata_retains_full_canvas_and_text_stop(worker_cls):
+    worker = object.__new__(worker_cls)
+    worker.cfg = {
+        "vllm_kwargs": {"diffusion_config": {"return_reveal_steps": True}},
+        "stop_token_ids": [11],
+    }
+    completion = SimpleNamespace(token_ids=[7, 11, 9, 100], reveal_steps=[1, 2, 0, -1])
+    result = worker._completion_metadata(completion, input_length=4, padded_length=10)
+    assert result["reveal_steps"].tolist() == [-1, -1, -1, -1, 1, 2, 0, -1, -1, -1]
+    assert int(result["response_lengths"]) == 2
+    completion.reveal_steps = None
+    with pytest.raises(ValueError, match="reveal step"):
+        worker._completion_metadata(completion, input_length=4, padded_length=10)

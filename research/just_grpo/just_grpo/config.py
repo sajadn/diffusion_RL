@@ -13,17 +13,19 @@
 # limitations under the License.
 """Configuration types and validation; experiment defaults live in YAML."""
 
-from typing import Literal, Self
+from typing import Self
 
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
-from just_grpo.diffusion.config import DiffusionSamplingParams
+from just_grpo.diffusion.config import (
+    DiffusionSamplingParams as DiffusionSamplingParams,
+    DiffusionExperimentConfig,
+    BlockDiffusionConfig,
+)
 
 
-class ScheduleConfig(BaseModel, extra="allow"):
-    mask_token_id: int
-    block_size: int = Field(gt=0)
+class ScheduleConfig(BlockDiffusionConfig, extra="allow"):
     reveal_tokens_per_step: int = Field(gt=0)
 
     @model_validator(mode="after")
@@ -33,17 +35,11 @@ class ScheduleConfig(BaseModel, extra="allow"):
         return self
 
 
-class JustGRPOConfig(BaseModel, extra="forbid"):
+class JustGRPOConfig(DiffusionExperimentConfig):
     """Diffusion-specific extension to the standard NeMo-RL configuration."""
 
-    runtime: Literal["reference_vllm", "megatron", "upstream_vllm", "upstream_sglang"]
-    generation_python: str | None
-    max_generation_kl: float = Field(ge=0)
     training_token_fraction: float = Field(gt=0, le=1)
-    distributed: bool
     schedule: ScheduleConfig
-    sampling: DiffusionSamplingParams
-    validation_sampling: DiffusionSamplingParams
 
     @model_validator(mode="after")
     def validate_training_distribution(self) -> Self:
@@ -61,7 +57,11 @@ class JustGRPOConfig(BaseModel, extra="forbid"):
         if self.training_token_fraction < 1 and s.reveal_tokens_per_step != 1:
             raise ValueError("Fast partial views require one token per reveal")
         for params in (p, self.validation_sampling):
-            if params.returns_entropy or params.returns_reveal_steps:
+            if (
+                params.returns_entropy
+                or params.returns_reveal_steps
+                or params.emit_full_blocks
+            ):
                 raise ValueError(
                     "Generation does not yet transport entropy/reveal channels"
                 )
@@ -72,12 +72,27 @@ class JustGRPOConfig(BaseModel, extra="forbid"):
         return self
 
 
-def validate_config(config: "DictConfig") -> JustGRPOConfig:
-    """Validate the supported research subset of the upstream GRPO schema."""
-    diffusion = JustGRPOConfig.model_validate(
+def get_diffusion_config(config: DictConfig) -> DiffusionExperimentConfig:
+    """Select the algorithm's configuration at the research entrypoint."""
+    if config.get("trace_grpo") is not None:
+        from just_grpo.algorithms.trace_grpo import TraceGRPOConfig
+
+        return TraceGRPOConfig.model_validate(
+            OmegaConf.to_container(config.trace_grpo, resolve=True)
+        )
+    return JustGRPOConfig.model_validate(
         OmegaConf.to_container(config.just_grpo, resolve=True)
     )
+
+
+def validate_config(config: "DictConfig") -> DiffusionExperimentConfig:
+    """Validate the supported research subset of the upstream GRPO schema."""
+    diffusion = get_diffusion_config(config)
     g, p, loss = config.grpo, config.policy, config.loss_fn
+    if config.get("trace_grpo") is not None:
+        from just_grpo.algorithms.trace_grpo import validate_trace_experiment
+
+        validate_trace_experiment(config)
     if loss.force_on_policy_ratio:
         raise ValueError(
             "JustGRPO requires recomputed prev_logprobs; force_on_policy_ratio must be false"
@@ -313,9 +328,7 @@ def validate_config(config: "DictConfig") -> JustGRPOConfig:
         ):
             raise ValueError("Reference vLLM requires its diffusion worker extension")
         params = diffusion.sampling
-        if OmegaConf.to_container(
-            p.generation.vllm_kwargs.diffusion_config, resolve=True
-        ) != {
+        expected_diffusion = {
             "canvas_length": params.block_size,
             "max_denoising_steps": params.max_steps,
             "temperature": params.temperature,
@@ -323,7 +336,15 @@ def validate_config(config: "DictConfig") -> JustGRPOConfig:
             "confidence_threshold": params.threshold,
             "return_entropy": params.returns_entropy,
             "return_reveal_steps": params.returns_reveal_steps,
-        }:
+        }
+        if params.emit_full_blocks is not None:
+            expected_diffusion["emit_full_blocks"] = params.emit_full_blocks
+        if (
+            OmegaConf.to_container(
+                p.generation.vllm_kwargs.diffusion_config, resolve=True
+            )
+            != expected_diffusion
+        ):
             raise ValueError("vLLM diffusion_config must match just_grpo.sampling")
         vllm = p.generation.vllm_cfg
         if (

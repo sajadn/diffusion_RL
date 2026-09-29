@@ -1657,6 +1657,12 @@ class VllmAsyncGenerationWorkerImpl(
                 "unpadded_sequence_lengths": unpadded_sequence_lengths_tensor,
                 "truncated": truncated_tensor,
             }
+            for key, value in self._completion_metadata(
+                generation_details,
+                input_length=current_input_actual_length,
+                padded_length=final_output_tensor_len,
+            ).items():
+                result_dict[key] = value.unsqueeze(0)
             routed_experts, r3_stats = pad_and_align_routed_expert_indices(
                 final_request_output,
                 generation_details,

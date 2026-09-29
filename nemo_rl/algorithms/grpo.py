@@ -2739,7 +2739,7 @@ def compute_and_apply_seq_logprob_error_masking(
         num_masked_seqs, masked_correct_pct
     """
     # Compute sequence-level logprob error metrics (always)
-    token_mask = train_data["token_mask"][:, 1:]
+    token_mask = train_data.get("logprob_token_mask", train_data["token_mask"])[:, 1:]
     sample_mask = train_data["sample_mask"]
     prev_logprobs = train_data["prev_logprobs"][:, 1:]
     generation_logprobs = train_data["generation_logprobs"][:, 1:]
@@ -2897,8 +2897,11 @@ def _grpo_train_impl(
     grpo_save_state: GRPOSaveState,
     master_config: MasterConfig,
     processor: Optional[AutoProcessor] = None,
+    prepare_training_data_fn: Optional[
+        Callable[[BatchedDataDict, list[LLMMessageLogType], int], None]
+    ] = None,
 ) -> None:
-    """Run GRPO training algorithm."""
+    """Run GRPO; optionally prepare algorithm batch fields once before scoring."""
     timer = Timer(context={"worker": "driver"})
     _telemetry = get_telemetry_handle()
     _tracer = _telemetry.tracer if _telemetry is not None else None
@@ -3445,6 +3448,11 @@ def _grpo_train_impl(
 
                     metrics_logging_data["content"] = flat_messages["content"]
 
+                if prepare_training_data_fn is not None:
+                    prepare_training_data_fn(
+                        train_data, repeated_batch["message_log"], total_steps
+                    )
+
                 memory_tracker.snapshot_start_of_stage("Computing logprobs", dir())
                 skip_prev_logprobs, skip_reference_logprobs = (
                     _resolve_logprob_skip_flags(master_config)
@@ -3467,27 +3475,8 @@ def _grpo_train_impl(
                         tracer=_tracer,
                     ),
                 ):
-                    # Custom create this logprob_data so we avoid Ray comm overheads sending unused data to workers.
-                    logprob_data = BatchedDataDict[ClippedPGLossDataDict](
-                        {
-                            "input_ids": train_data["input_ids"],
-                            "input_lengths": train_data["input_lengths"],
-                            "token_mask": flat_messages["token_loss_mask"],
-                            "sample_mask": repeated_batch["loss_multiplier"],
-                            "generation_logprobs": train_data["generation_logprobs"],
-                            **extra_multimodal_data,
-                        }
-                    )
-                    # Router replay (R3): the prev-logprobs forward replays the
-                    # recorded routed_experts, so logprob_data must carry the
-                    # field too (it is a separate whitelist from train_data). The
-                    # reference-policy logprobs call reuses logprob_data but
-                    # intentionally ignores routed_experts (require_router_replay
-                    # =False short-circuits before the field is read), so a
-                    # present-but-unused field here is safe.
-                    _preserve_router_replay_routed_experts(
-                        logprob_data, flat_messages, master_config.policy
-                    )
+                    # Preserve algorithm-prepared token metadata and sampled contexts.
+                    logprob_data = BatchedDataDict(train_data)
 
                     if not skip_prev_logprobs:
                         train_data["prev_logprobs"] = policy.get_logprobs(
@@ -4098,6 +4087,9 @@ def grpo_train(
     grpo_save_state: GRPOSaveState,
     master_config: MasterConfig,
     processor: Optional[AutoProcessor] = None,
+    prepare_training_data_fn: Optional[
+        Callable[[BatchedDataDict, list[LLMMessageLogType], int], None]
+    ] = None,
 ) -> None:
     """Run GRPO training and always tear down its environments."""
     try:
@@ -4115,6 +4107,7 @@ def grpo_train(
             grpo_save_state=grpo_save_state,
             master_config=master_config,
             processor=processor,
+            prepare_training_data_fn=prepare_training_data_fn,
         )
     finally:
         shutdown_environments(task_to_env, val_task_to_env)
@@ -4497,6 +4490,9 @@ def async_grpo_train(
     teacher_worker_groups: Optional[dict[str, Any]] = None,
     alias_to_group_alias: Optional[dict[str, str]] = None,
     processor: Optional[AutoProcessor] = None,
+    prepare_training_data_fn: Optional[
+        Callable[[BatchedDataDict, list[LLMMessageLogType], int], None]
+    ] = None,
 ) -> None:
     """Run asynchronous GRPO training with replay buffer.
 
@@ -4514,6 +4510,8 @@ def async_grpo_train(
         grpo_save_state: Training state
         master_config: Master configuration
         max_trajectory_age_steps: Maximum age (in training steps) for trajectories to be used in training
+        prepare_training_data_fn: Optional in-place batch preparation before all
+            policy/reference scoring and training, called once per optimizer step.
         processor: Optional multimodal processor used to attach compact policy
             media to NeMo Gym prompt rows.
     """
@@ -5260,6 +5258,11 @@ def async_grpo_train(
                         )
                     )
                     train_data.to("cpu")
+
+                if prepare_training_data_fn is not None:
+                    prepare_training_data_fn(
+                        train_data, repeated_batch["message_log"], step
+                    )
 
                 generation_logger_metrics = None
                 if policy_generation.blocks_training():

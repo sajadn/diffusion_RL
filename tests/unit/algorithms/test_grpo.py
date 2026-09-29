@@ -6432,3 +6432,17 @@ def test_grpo_train_sync_logs_data_plane_metrics_before_committing_the_step(
         if f"data_plane/{scope}/breakdown" in c.args
     ], "the per-op breakdown table was not logged"
     client.close()
+
+
+def test_sequence_diagnostics_only_consider_scored_positions():
+    from nemo_rl.algorithms.grpo import compute_and_apply_seq_logprob_error_masking
+
+    data = BatchedDataDict(
+        token_mask=torch.tensor([[0, 1, 1]]),
+        sample_mask=torch.ones(1),
+        logprob_token_mask=torch.tensor([[False, True, False]]),
+        prev_logprobs=torch.tensor([[0.0, -1.0, 0.0]]),
+        generation_logprobs=torch.tensor([[0.0, -1.0, -100.0]]),
+    )
+    metrics = compute_and_apply_seq_logprob_error_masking(data, torch.ones(1), None)
+    assert metrics["mean_seq_mult_prob_error"] == 1.0

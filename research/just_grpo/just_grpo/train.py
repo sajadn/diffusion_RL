@@ -23,7 +23,7 @@ from just_grpo.config import validate_config
 
 def run(config: DictConfig) -> None:
     """Configure research adapters, then delegate setup and training upstream."""
-    validate_config(config)
+    diffusion = validate_config(config)
     # The full controller imports optional training and tracking dependencies.
     from just_grpo.environments.sudoku import SudokuEnvironment, SudokuResponseDataset
     from just_grpo.generation.megatron_generation import MegatronDiffusionGeneration
@@ -58,10 +58,10 @@ def run(config: DictConfig) -> None:
         master.policy["generation"], tokenizer
     )
     master.policy["megatron_cfg"]["train_iters"] = master.grpo.max_num_steps
-    if config.just_grpo.runtime == "reference_vllm":
+    if diffusion.runtime == "reference_vllm":
         generation_worker = master.policy["generation"]["worker_extension_cls_fqn"]
         ACTOR_ENVIRONMENT_REGISTRY[generation_worker] = (
-            config.just_grpo.generation_python
+            diffusion.generation_python
             or get_actor_python_env(
                 "nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker"
                 if master.grpo.async_grpo.enabled
@@ -90,7 +90,7 @@ def run(config: DictConfig) -> None:
             _,
             _,
         ) = setup(master, tokenizer, train_data, val_data)
-        if config.just_grpo.runtime == "megatron":
+        if diffusion.runtime == "megatron":
             # Colocated setup has not started an engine (HTTP serving is disabled).
             generation.shutdown()
             generation = MegatronDiffusionGeneration(policy=policy, config=master)
@@ -111,6 +111,13 @@ def run(config: DictConfig) -> None:
         )
         if logger.wandb_logger is not None:
             (output / "wandb_url.txt").write_text(logger.wandb_logger.run.url + "\n")
+        if config.get("trace_grpo") is not None:
+            from just_grpo.algorithms.trace_grpo import TraceGRPO
+
+            algorithm = TraceGRPO(
+                diffusion, stop_token_ids=master.policy["generation"]["stop_token_ids"]
+            )
+            trainer_kwargs["prepare_training_data_fn"] = algorithm.prepare_training_data
         with checkpointer:
             trainer(
                 policy,

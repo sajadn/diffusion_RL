@@ -17,7 +17,7 @@ import argparse
 from pathlib import Path
 
 
-def main() -> None:
+def main(default_config: Path | None = None) -> None:
     from just_grpo.train import run
     from omegaconf import OmegaConf
     from nemo_rl.utils.config import (
@@ -30,7 +30,8 @@ def main() -> None:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path(__file__).parent
+        default=default_config
+        or Path(__file__).parent
         / "configs/recipes/just_grpo-sudoku6x6-4n8g-megatron-inference-long.yaml",
     )
     parser.add_argument("--model")
@@ -46,6 +47,8 @@ def main() -> None:
     ):
         value = vars(args)[argument]
         if value is not None:
+            if argument == "generation_python" and raw.get("trace_grpo") is not None:
+                path = "trace_grpo.generation_python"
             OmegaConf.update(raw, path, value)
     OmegaConf.resolve(raw)
     run(raw)
