@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import ABC, abstractmethod
-from typing import Any, Optional, TypedDict
+from typing import Any, NotRequired, Optional, TypedDict
 
 import ray
 import torch
@@ -27,12 +27,16 @@ class LogprobOutputSpec(TypedDict):
     """logprobs: Tensor of log probabilities."""
 
     logprobs: torch.Tensor
+    # Boolean [batch, sequence] coverage in input-token coordinates, when supplied.
+    logprob_token_mask: NotRequired[torch.Tensor]
 
 
 class ReferenceLogprobOutputSpec(TypedDict):
     """logprobs: Tensor of log probabilities."""
 
     reference_logprobs: torch.Tensor
+    # Boolean [batch, sequence] coverage in input-token coordinates, when supplied.
+    logprob_token_mask: NotRequired[torch.Tensor]
 
 
 class ScoreOutputSpec(TypedDict):

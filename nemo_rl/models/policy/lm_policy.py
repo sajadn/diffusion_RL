@@ -696,7 +696,8 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
 
         Returns:
           a BatchedDataDict with key "logprobs" and shape [batch_size, sequence_length].
-          We use the convention that the logprob of the first token is 0 so that the sequence length is maintained.
+          Next-token workers pad the first token score with 0; same-position workers
+          may score it. Optional logprob_token_mask identifies computed positions.
           The logprob of input token i is specified at position i in the output logprobs tensor.
         """
         with timer.time("get_logprobs/shard_data") if timer else nullcontext():

@@ -2,6 +2,23 @@
 
 The research driver supports Megatron training with reference vLLM or in-process Megatron generation. The earlier Transformers training adapter and its verification-only worker have been removed. Historical artifacts remain in their original run directories and Git history.
 
+## Scoring coverage and diagnostic alignment (2026-09-28)
+
+Diffusion scoring now returns `logprob_token_mask` alongside scores, collected
+from the actual schedule views. Trace no longer constructs diagnostic coverage
+in the driver. Both sync and async GRPO consume the worker mask, with the existing
+response-mask fallback for other workers. Their diagnostic accepts `shift_labels`;
+the diffusion entrypoint passes `False`, retaining valid scores at position zero.
+
+Validation: **154 research CPU tests passed, 3 optional-dependency skips**.
+The core GRPO module could not import because this CPU environment lacks
+`soundfile`. Extracting the production diagnostic function and its checked-in
+test class/functions with AST, without dataset imports, passed **15 tests**.
+These cover both alignment modes, fallback/explicit coverage, sparse scores,
+and sequence rejection. Aggregation tests cover zero-valued computed scores,
+full/Fast coverage, reordered rows, excluded samples, and Trace replay coverage.
+Ruff check/format and `git diff --check` passed. No new GPU smoke was run.
+
 ## Shared diffusion worker API (2026-09-28)
 
 The algorithm worker now only parses JustGRPO configuration and implements

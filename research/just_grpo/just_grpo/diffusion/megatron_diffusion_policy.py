@@ -133,7 +133,10 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
                 micro_batch_size=micro_batch_size,
                 require_router_replay=False,
             )
-        return BatchedDataDict(reference_logprobs=scores["logprobs"])
+        return BatchedDataDict(
+            reference_logprobs=scores["logprobs"],
+            logprob_token_mask=scores["logprob_token_mask"],
+        )
 
     def _get_schedule_logprobs(
         self,
@@ -158,7 +161,7 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
             original_shape=data["input_ids"].shape,
             device=data["input_ids"].device,
         )
-        return BatchedDataDict(logprobs=scores.cpu())
+        return scores.to("cpu")
 
     def train(
         self,

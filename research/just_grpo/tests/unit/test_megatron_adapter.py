@@ -396,14 +396,14 @@ def test_scoring_coverage_depends_on_policy_role_not_router_replay(
 
     monkeypatch.setattr(MegatronPolicyWorkerImpl, "get_logprobs", score)
     result = (
-        worker.get_reference_policy_logprobs(data=data, micro_batch_size=1)[
-            "reference_logprobs"
-        ]
+        worker.get_reference_policy_logprobs(data=data, micro_batch_size=1)
         if reference
         else worker.get_logprobs(
             data=data, micro_batch_size=1, require_router_replay=replay
-        )["logprobs"]
+        )
     )
+    torch.testing.assert_close(result["logprob_token_mask"], expected_mask)
+    result = result["reference_logprobs" if reference else "logprobs"]
     assert len(calls) == (1 if reference and fraction < 1 else 4)
     assert not active
     torch.testing.assert_close(result, data["input_ids"].float() * expected_mask)

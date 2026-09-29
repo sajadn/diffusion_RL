@@ -107,15 +107,17 @@ def aggregate_diffusion_logprobs(
     *,
     original_shape: tuple[int, int],
     device: torch.device,
-) -> torch.Tensor:
+) -> BatchedDataDict[Any]:
     """Score one view at a time and collect selected scores in rollout coordinates.
 
     The caller supplies views at its backend's batch granularity and manages
     model/reference weights. score_fn returns same-position [batch, sequence]
-    scores. Empty views are passed through: distributed scorers may need their
+    scores. Returns logprobs and boolean logprob_token_mask in rollout coordinates.
+    Empty views are passed through: distributed scorers may need their
     collectives even when this rank has no selected tokens.
     """
     result = torch.zeros(original_shape, device=device, dtype=torch.float32)
+    coverage = torch.zeros(original_shape, device=device, dtype=torch.bool)
     for trajectory in trajectories:
         trajectory = trajectory.to(device)
         values = score_fn(trajectory).to(device=device, dtype=result.dtype)
@@ -126,5 +128,6 @@ def aggregate_diffusion_logprobs(
             values[active],
             accumulate=True,
         )
+        coverage[rows[active], trajectory["original_positions"][active]] = True
         del trajectory, values
-    return result
+    return BatchedDataDict(logprobs=result, logprob_token_mask=coverage)

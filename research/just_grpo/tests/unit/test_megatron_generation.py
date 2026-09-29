@@ -112,7 +112,9 @@ def test_sampled_logprobs_match_block_training(reveal):
         device=torch.device("cpu"),
     )
     expected = torch.tensor([r["logprobs"] for r in responses])
-    torch.testing.assert_close(recomputed[:, 4:], expected, atol=2e-6, rtol=1e-5)
+    torch.testing.assert_close(
+        recomputed["logprobs"][:, 4:], expected, atol=2e-6, rtol=1e-5
+    )
     first, positions = decoder.calls[0]
     assert first.shape == (2, 32)
     assert (first[:, 4:16] == 31).all()

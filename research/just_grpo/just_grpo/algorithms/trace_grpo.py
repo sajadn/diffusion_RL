@@ -152,10 +152,6 @@ class TraceGRPO:
         data["trace_sampled_levels"] = selected
         data["trace_loss_weights"] = weights
         data["trace_loss_mask"] = loss_mask
-        # Sparse scores must never be diagnosed as zero-logprob full responses.
-        data["logprob_token_mask"] = loss_mask & (
-            levels[:, :, None] == selected[:, None, :]
-        ).any(-1)
 
 
 class TraceGRPOSchedule(DenoisingSchedule):

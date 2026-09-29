@@ -132,6 +132,7 @@ def run(config: DictConfig) -> None:
                 checkpointer,
                 state,
                 master,
+                shift_labels=False,
                 **trainer_kwargs,
             )
     finally:

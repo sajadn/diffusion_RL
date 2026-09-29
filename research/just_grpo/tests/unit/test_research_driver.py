@@ -98,9 +98,10 @@ def test_driver_uses_unmodified_setup_and_selects_upstream_trainer(
             policy.offload_before_refit.assert_called_once()
             policy.prepare_for_lp_inference.assert_called_once()
             assert generation.blocks_training()
-        assert kwargs == (
-            {"max_trajectory_age_steps": 2} if mode == "megatron-async" else {}
-        )
+        expected_kwargs = {"shift_labels": False}
+        if mode == "megatron-async":
+            expected_kwargs["max_trajectory_age_steps"] = 2
+        assert kwargs == expected_kwargs
 
     grpo = ModuleType("nemo_rl.algorithms.grpo")
     grpo.MasterConfig = master_config

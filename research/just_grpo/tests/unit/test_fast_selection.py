@@ -101,7 +101,8 @@ def test_selection_preserves_every_denoising_canvas_and_selected_logprob():
         original_shape=selected.shape,
         device=torch.device("cpu"),
     )
-    assert not sparse_logprobs[~selected].any()
+    assert not sparse_logprobs["logprobs"][~selected].any()
+    torch.testing.assert_close(sparse_logprobs["logprob_token_mask"], selected)
 
 
 def test_training_mask_must_not_select_prompt_or_padding():

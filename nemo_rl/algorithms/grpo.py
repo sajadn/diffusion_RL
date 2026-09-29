@@ -2718,6 +2718,8 @@ def compute_and_apply_seq_logprob_error_masking(
     train_data: BatchedDataDict,
     rewards: torch.Tensor,
     seq_logprob_error_threshold: Optional[float],
+    *,
+    shift_labels: bool = True,
 ) -> dict:
     """Compute sequence-level logprob error metrics and optionally mask high-error sequences.
 
@@ -2732,6 +2734,8 @@ def compute_and_apply_seq_logprob_error_masking(
         rewards: Reward tensor for computing statistics on masked sequences.
         seq_logprob_error_threshold: If set, mask sequences with mult_prob_error
                                     exceeding this threshold. If None, only compute metrics.
+        shift_labels: Exclude position zero for next-token scoring. Use False for
+            same-position scores. All scores and masks use input-token coordinates.
 
     Returns:
         Dict with keys: max_seq_mult_prob_error, mean_seq_mult_prob_error,
@@ -2739,13 +2743,16 @@ def compute_and_apply_seq_logprob_error_masking(
         num_masked_seqs, masked_correct_pct
     """
     # Compute sequence-level logprob error metrics (always)
-    token_mask = train_data.get("logprob_token_mask", train_data["token_mask"])[:, 1:]
+    start = 1 if shift_labels else 0
+    token_mask = train_data.get("logprob_token_mask", train_data["token_mask"])[
+        :, start:
+    ]
     sample_mask = train_data["sample_mask"]
-    prev_logprobs = train_data["prev_logprobs"][:, 1:]
-    generation_logprobs = train_data["generation_logprobs"][:, 1:]
+    prev_logprobs = train_data["prev_logprobs"][:, start:]
+    generation_logprobs = train_data["generation_logprobs"][:, start:]
     lp_error = torch.abs(generation_logprobs - prev_logprobs)
 
-    # Use combined mask exactly as in loss function
+    # Restrict the diagnostic to computed scores from included samples.
     mask = token_mask * sample_mask.unsqueeze(-1)
 
     # Calculate sequence-level multiplicative prob error.
@@ -2900,6 +2907,7 @@ def _grpo_train_impl(
     prepare_training_data_fn: Optional[
         Callable[[BatchedDataDict, list[LLMMessageLogType], int], None]
     ] = None,
+    shift_labels: bool = True,
 ) -> None:
     """Run GRPO; optionally prepare algorithm batch fields once before scoring."""
     timer = Timer(context={"worker": "driver"})
@@ -3479,9 +3487,12 @@ def _grpo_train_impl(
                     logprob_data = BatchedDataDict(train_data)
 
                     if not skip_prev_logprobs:
-                        train_data["prev_logprobs"] = policy.get_logprobs(
-                            logprob_data, timer=timer
-                        )["logprobs"]
+                        policy_scores = policy.get_logprobs(logprob_data, timer=timer)
+                        train_data["prev_logprobs"] = policy_scores["logprobs"]
+                        train_data["logprob_token_mask"] = policy_scores.get(
+                            "logprob_token_mask", train_data["token_mask"]
+                        )
+                        del policy_scores
                     else:
                         print(
                             "▶ Skipping prev_logprobs (force_on_policy_ratio=True)...",
@@ -3519,6 +3530,7 @@ def _grpo_train_impl(
                         train_data=train_data,
                         rewards=rewards,
                         seq_logprob_error_threshold=seq_logprob_error_threshold,
+                        shift_labels=shift_labels,
                     )
                     seq_logprob_error_metrics = seq_error_result
                     if "num_masked_seqs" in seq_logprob_error_metrics:
@@ -4090,6 +4102,7 @@ def grpo_train(
     prepare_training_data_fn: Optional[
         Callable[[BatchedDataDict, list[LLMMessageLogType], int], None]
     ] = None,
+    shift_labels: bool = True,
 ) -> None:
     """Run GRPO training and always tear down its environments."""
     try:
@@ -4108,6 +4121,7 @@ def grpo_train(
             master_config=master_config,
             processor=processor,
             prepare_training_data_fn=prepare_training_data_fn,
+            shift_labels=shift_labels,
         )
     finally:
         shutdown_environments(task_to_env, val_task_to_env)
@@ -4493,6 +4507,7 @@ def async_grpo_train(
     prepare_training_data_fn: Optional[
         Callable[[BatchedDataDict, list[LLMMessageLogType], int], None]
     ] = None,
+    shift_labels: bool = True,
 ) -> None:
     """Run asynchronous GRPO training with replay buffer.
 
@@ -4512,6 +4527,8 @@ def async_grpo_train(
         max_trajectory_age_steps: Maximum age (in training steps) for trajectories to be used in training
         prepare_training_data_fn: Optional in-place batch preparation before all
             policy/reference scoring and training, called once per optimizer step.
+        shift_labels: Whether sequence diagnostics exclude the first token as in
+            next-token losses. False for same-position diffusion scores.
         processor: Optional multimodal processor used to attach compact policy
             media to NeMo Gym prompt rows.
     """
@@ -5295,9 +5312,12 @@ def async_grpo_train(
                     ),
                 ):
                     if not skip_prev_logprobs:
-                        train_data["prev_logprobs"] = policy.get_logprobs(
-                            train_data, timer=timer
-                        )["logprobs"]
+                        policy_scores = policy.get_logprobs(train_data, timer=timer)
+                        train_data["prev_logprobs"] = policy_scores["logprobs"]
+                        train_data["logprob_token_mask"] = policy_scores.get(
+                            "logprob_token_mask", train_data["token_mask"]
+                        )
+                        del policy_scores
                     else:
                         train_data["prev_logprobs"] = torch.zeros_like(
                             train_data["generation_logprobs"]
@@ -5328,6 +5348,7 @@ def async_grpo_train(
                         train_data=train_data,
                         rewards=rewards,
                         seq_logprob_error_threshold=seq_logprob_error_threshold,
+                        shift_labels=shift_labels,
                     )
                     seq_logprob_error_metrics = seq_error_result
                     if "num_masked_seqs" in seq_logprob_error_metrics:

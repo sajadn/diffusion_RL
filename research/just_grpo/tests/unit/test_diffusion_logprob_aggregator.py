@@ -17,6 +17,8 @@ import pytest
 import torch
 from test_fast_selection import confidence_batch, make_schedule
 from just_grpo.diffusion.denoising_schedule import aggregate_diffusion_logprobs
+from just_grpo.algorithms.block_just_grpo import select_low_confidence_tokens
+from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
 
 @pytest.mark.parametrize("microbatch_size", [1, 2])
@@ -52,9 +54,10 @@ def test_aggregation_is_lazy_and_preserves_original_positions(microbatch_size):
     if microbatch_size == 1:
         assert empty_views > 0  # Do not skip distributed scoring collectives.
     torch.testing.assert_close(
-        result, data["input_ids"].float() / 10 * data["token_mask"]
+        result["logprobs"], data["input_ids"].float() / 10 * data["token_mask"]
     )
-    assert not result.requires_grad
+    assert not result["logprobs"].requires_grad
+    torch.testing.assert_close(result["logprob_token_mask"], data["token_mask"].bool())
 
 
 def test_aggregator_follows_schedule_level_order(monkeypatch):
@@ -82,4 +85,30 @@ def test_aggregator_follows_schedule_level_order(monkeypatch):
         device=torch.device("cpu"),
     )
     assert produced == consumed == order
-    torch.testing.assert_close(result, data["input_ids"].float() * data["token_mask"])
+    torch.testing.assert_close(
+        result["logprobs"], data["input_ids"].float() * data["token_mask"]
+    )
+    torch.testing.assert_close(result["logprob_token_mask"], data["token_mask"].bool())
+
+
+@pytest.mark.parametrize("fraction", [1.0, 0.25])
+def test_zero_scores_still_report_full_or_fast_coverage_after_reordering(fraction):
+    data = confidence_batch()
+    data["sample_mask"][-1] = 0
+    selected = select_low_confidence_tokens(data, fraction=fraction, block_size=4)
+    data["training_token_mask"] = selected
+    schedule = make_schedule(data)
+
+    def reordered_views():
+        for view in schedule.iter_levels():
+            yield BatchedDataDict({key: value.flip(0) for key, value in view.items()})
+
+    result = aggregate_diffusion_logprobs(
+        reordered_views(),
+        lambda view: torch.zeros_like(view["input_ids"], dtype=torch.float32),
+        original_shape=data["input_ids"].shape,
+        device=torch.device("cpu"),
+    )
+    assert not result["logprobs"].any()
+    assert selected.any()
+    torch.testing.assert_close(result["logprob_token_mask"], selected)

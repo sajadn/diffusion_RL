@@ -127,7 +127,13 @@ def test_sampled_trace_scores_match_recorded_generation(k, selection):
         original_shape=data["input_ids"].shape,
         device=torch.device("cpu"),
     )
-    selected = data["logprob_token_mask"]
+    selected = scores["logprob_token_mask"]
+    expected = data["trace_loss_mask"] & (
+        data["trace_reveal_levels"][:, :, None]
+        == data["trace_sampled_levels"][:, None, :]
+    ).any(-1)
+    torch.testing.assert_close(selected, expected)
+    scores = scores["logprobs"]
     assert len(calls) == k
     torch.testing.assert_close(
         scores[selected], data["generation_logprobs"][selected], atol=1e-6, rtol=1e-5
@@ -203,7 +209,14 @@ def test_post_stop_context_is_replayed_but_never_trained():
     views = list(schedule.iter_levels())
     assert views[2]["masked_indices"][0, 4:].tolist() == [False, True, False, True]
     assert views[2]["token_mask"][0, 4:].tolist() == [0.0, 1.0, 0.0, 0.0]
-    assert not data["logprob_token_mask"][0, 6:].any()
+    scores = aggregate_diffusion_logprobs(
+        schedule.iter_levels(),
+        lambda view: torch.zeros_like(view["input_ids"], dtype=torch.float32),
+        original_shape=data["input_ids"].shape,
+        device=torch.device("cpu"),
+    )
+    assert scores["logprob_token_mask"][0, 4:6].all()
+    assert not scores["logprob_token_mask"][0, 6:].any()
 
 
 def test_missing_reveal_metadata_fails_before_scoring():
