@@ -142,3 +142,5 @@ uv run --extra mcore python research/just_grpo/run_trace_grpo.py \
 Reference implementation: `diffusion_RL/RL/nemo_rl/algorithms/trace_grpo_logprobs.py`
 and `nemo_rl/models/policy/workers/trace_grpo_megatron_policy_worker.py` at
 `2fad6d2cc8c4ec13bfaf5bf90bd64404268c6c81` (read from the DFW checkout).
+
+Context distillation lives in [research/step_distillation](../step_distillation/README.md).

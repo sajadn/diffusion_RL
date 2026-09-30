@@ -14,18 +14,34 @@
 """Run Block JustGRPO through NeMo-RL's upstream GRPO controller."""
 
 from pathlib import Path
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import ray
 from omegaconf import DictConfig, OmegaConf
 
 from just_grpo.config import validate_config
+from just_grpo.diffusion.config import DiffusionExperimentConfig
+from just_grpo.algorithms.trace_grpo import TraceGRPO
+from nemo_rl.algorithms.loss.interfaces import LossFunction
+
+if TYPE_CHECKING:
+    from nemo_rl.models.policy.lm_policy import Policy
 
 
-def run(config: DictConfig) -> None:
+def run(
+    config: DictConfig,
+    *,
+    validate: Callable[[DictConfig], DiffusionExperimentConfig] = validate_config,
+    configure_training: Callable[["Policy", list[int]], tuple[TraceGRPO, LossFunction]]
+    | None = None,
+) -> None:
     """Configure research adapters, then delegate setup and training upstream."""
-    diffusion = validate_config(config)
+    diffusion = validate(config)
     # The full controller imports optional training and tracking dependencies.
     from just_grpo.environments.sudoku import SudokuEnvironment, SudokuResponseDataset
+    from just_grpo.environments.math_data import BlockAlignedMathDataset
+    from nemo_rl.data.utils import setup_response_data
     from just_grpo.generation.megatron_generation import MegatronDiffusionGeneration
     from nemo_rl.algorithms.grpo import (
         MasterConfig,
@@ -69,10 +85,22 @@ def run(config: DictConfig) -> None:
             )
         )
     init_ray()
-    train_data = SudokuResponseDataset(config, tokenizer)
-    val_data = SudokuResponseDataset(config, tokenizer, validation=True)
-    env = SudokuEnvironment.remote()
-    environments = {config.data.default.env_name: env}
+    if config.data.default.env_name == "sudoku6x6":
+        train_data = SudokuResponseDataset(config, tokenizer)
+        val_data = SudokuResponseDataset(config, tokenizer, validation=True)
+        env = SudokuEnvironment.remote()
+        environments = {config.data.default.env_name: env}
+        val_environments = environments
+    else:
+        train_data, val_data, environments, val_environments = setup_response_data(
+            tokenizer, master.data, master.env
+        )
+        alignment = dict(
+            block_size=diffusion.schedule.block_size,
+            mask_token_id=diffusion.schedule.mask_token_id,
+        )
+        train_data = BlockAlignedMathDataset(train_data, **alignment)
+        val_data = BlockAlignedMathDataset(val_data, **alignment)
     logger = generation = None
     try:
         (
@@ -111,9 +139,12 @@ def run(config: DictConfig) -> None:
         )
         if logger.wandb_logger is not None:
             (output / "wandb_url.txt").write_text(logger.wandb_logger.run.url + "\n")
-        if config.get("trace_grpo") is not None:
-            from just_grpo.algorithms.trace_grpo import TraceGRPO
-
+        if configure_training is not None:
+            algorithm, loss_fn = configure_training(
+                policy, master.policy["generation"]["stop_token_ids"]
+            )
+            trainer_kwargs["prepare_training_data_fn"] = algorithm.prepare_training_data
+        elif config.get("trace_grpo") is not None:
             algorithm = TraceGRPO(
                 diffusion, stop_token_ids=master.policy["generation"]["stop_token_ids"]
             )
@@ -127,7 +158,7 @@ def run(config: DictConfig) -> None:
                 tokenizer,
                 loss_fn,
                 environments,
-                environments,
+                val_environments,
                 logger,
                 checkpointer,
                 state,

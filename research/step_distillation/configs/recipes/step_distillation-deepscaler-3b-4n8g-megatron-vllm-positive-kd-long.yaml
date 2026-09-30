@@ -1,0 +1,77 @@
+defaults: ../../../just_grpo/configs/recipes/trace_grpo-sudoku6x6-4n8g-megatron-vllm-long.yaml
+grpo:
+  num_prompts_per_step: 128
+  num_generations_per_prompt: 8
+  max_num_steps: 1000000
+  val_period: -1
+  val_at_start: false
+  val_at_end: false
+  max_val_samples: 512
+  skip_reference_policy_logprobs_calculation: true
+loss_fn:
+  reference_policy_kl_penalty: 0.0
+  use_importance_sampling_correction: false
+  truncated_importance_sampling_type: null
+  truncated_importance_sampling_ratio: null
+checkpointing:
+  save_period: 10
+  enabled: true
+  checkpoint_dir: ${logger.log_dir}/checkpoints
+  metric_name: null
+  keep_top_k: 100
+  checkpoint_must_save_by: 00:03:40:00
+  save_optimizer: false
+policy:
+  worker_extension_cls_fqn: step_distillation.policy_worker.ContextDistillationPolicyWorker
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  max_total_sequence_length: 8192
+  generation:
+    max_new_tokens: 4096
+    vllm_kwargs:
+      diffusion_config:
+        max_denoising_steps: 4
+logger:
+  log_dir: results/step_distillation_deepscaler_positive_kd
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,step_distillation_deepscaler_positive_kd}
+trace_grpo:
+  schedule:
+    sampled_level_reduction: mean
+  sampling:
+    max_steps: 4
+    selection_policy: entropy
+  validation_sampling:
+    max_steps: 4
+step_distillation:
+  positive_only: true
+  min_reward: 0.0
+  target_source: less_masked_kd
+data:
+  _override_: true
+  max_input_seq_length: 2048
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    dataset_name: ResponseDataset
+    data_path: /lustre/fsw/portfolios/coreai/users/snorouzi/datasets/step_distillation_deepscaler_v2/train.jsonl
+    input_key: problem
+    output_key: answer
+    split_validation_size: 0
+  validation:
+    dataset_name: ResponseDataset
+    data_path: /lustre/fsw/portfolios/coreai/users/snorouzi/datasets/step_distillation_deepscaler_v2/validation.jsonl
+    input_key: problem
+    output_key: answer
+    split_validation_size: 0
+  default:
+    prompt_file: examples/prompts/cot.txt
+    system_prompt_file: null
+    processor: math_hf_data_processor
+    env_name: math
+env:
+  _override_: true
+  math:
+    num_workers: 8
+    math_verify_impl: hf_math_verify

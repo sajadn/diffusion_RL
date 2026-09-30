@@ -146,7 +146,12 @@ def test_async_context_check_and_native_stream_delegation(monkeypatch, max_model
 def test_reference_trace_metadata_retains_full_canvas_and_text_stop(worker_cls):
     worker = object.__new__(worker_cls)
     worker.cfg = {
-        "vllm_kwargs": {"diffusion_config": {"return_reveal_steps": True}},
+        "vllm_kwargs": {
+            "diffusion_config": {
+                "return_reveal_steps": True,
+                "selection_policy": "confidence_threshold",
+            }
+        },
         "stop_token_ids": [11],
     }
     completion = SimpleNamespace(token_ids=[7, 11, 9, 100], reveal_steps=[1, 2, 0, -1])
@@ -156,3 +161,23 @@ def test_reference_trace_metadata_retains_full_canvas_and_text_stop(worker_cls):
     completion.reveal_steps = None
     with pytest.raises(ValueError, match="reveal step"):
         worker._completion_metadata(completion, input_length=4, padded_length=10)
+
+
+def test_entropy_metadata_checks_fixed_reveal_count():
+    worker = object.__new__(ReferenceVllmWorkerImpl)
+    worker.cfg = {
+        "vllm_kwargs": {
+            "diffusion_config": {
+                "return_reveal_steps": True,
+                "selection_policy": "entropy",
+                "canvas_length": 4,
+                "max_denoising_steps": 2,
+            }
+        },
+        "stop_token_ids": [],
+    }
+    good = SimpleNamespace(token_ids=[7, 8, 9, 10], reveal_steps=[1, 0, 1, 0])
+    worker._completion_metadata(good, input_length=4, padded_length=8)
+    bad = SimpleNamespace(token_ids=[7, 8, 9, 10], reveal_steps=[0, 0, 0, 0])
+    with pytest.raises(ValueError, match="fixed count"):
+        worker._completion_metadata(bad, input_length=4, padded_length=8)

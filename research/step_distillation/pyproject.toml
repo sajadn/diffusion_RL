@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "step-distillation"
+version = "0.1.0"
+description = "Diffusion step and context distillation on NeMo RL"
+readme = "README.md"
+requires-python = ">=3.13.14,<3.14"
+dependencies = ["nemo-rl", "just-grpo"]
+
+[dependency-groups]
+test = ["pytest>=7.0.0"]
+
+[tool.uv.sources]
+nemo-rl = { workspace = true }
+just-grpo = { workspace = true }
+
+[tool.hatch.build]
+exclude = ["**/*.swp", "**/*.swo"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["step_distillation"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]

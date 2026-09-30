@@ -24,6 +24,7 @@ from typing import Any, Callable
 import torch
 from megatron.core import parallel_state
 
+from nemo_rl.algorithms.loss.interfaces import LossFunction, LossInputType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.distributed.model_utils import get_next_token_logprobs_from_logits
 from nemo_rl.models.megatron.data import ProcessedMicrobatch
@@ -78,9 +79,14 @@ def selected_diffusion_logprobs(
     return values.new_zeros(targets.shape).masked_scatter(selected, values)
 
 
-def _prepared_logprobs(
-    logits: torch.Tensor, data: BatchedDataDict[Any], **kwargs: Any
+def _prepared_diffusion_loss(
+    logits: torch.Tensor,
+    data: BatchedDataDict[Any],
+    loss_fn: LossFunction,
+    **kwargs: Any,
 ) -> tuple[dict[str, Any], BatchedDataDict[Any]]:
+    if loss_fn.input_type == LossInputType.LOGIT:
+        return {"logits": logits}, data
     return {
         "next_token_logprobs": logits,
         "shift_labels": False,
@@ -91,7 +97,7 @@ class DiffusionLossPostProcessor(LossPostProcessor):
     """Use shared diffusion scores with upstream loss and microbatch scaling."""
 
     def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, prepare_fn=_prepared_logprobs, **kwargs)
+        super().__init__(*args, prepare_fn=_prepared_diffusion_loss, **kwargs)
 
     def __call__(
         self,
@@ -109,6 +115,8 @@ class DiffusionLossPostProcessor(LossPostProcessor):
         )
 
         def process(logits: torch.Tensor) -> tuple[torch.Tensor, dict]:
+            if self.loss_fn.input_type == LossInputType.LOGIT:
+                return process_loss(logits)
             return process_loss(selected_diffusion_logprobs(logits, data_dict))
 
         return process

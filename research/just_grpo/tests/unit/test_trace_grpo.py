@@ -253,9 +253,9 @@ def test_sampling_changes_by_step_and_repeats_exactly():
                 "trace_sampled_levels"
             ][0, 0]
         )
-        for step in range(16)
+        for step in range(128)
     }
-    assert draws == {0, 1, 2, 3}
+    assert draws == set(range(8))
 
 
 def test_confidence_stop_retains_replay_context_and_semantic_length():

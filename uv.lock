@@ -66,6 +66,7 @@ conflicts = [[
 members = [
     "just-grpo",
     "nemo-rl",
+    "step-distillation",
     "template-project",
 ]
 constraints = [
@@ -7180,6 +7181,29 @@ sdist = { url = "https://files.pythonhosted.org/packages/1c/3f/a01a1a2dcb3d319e9
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c5/31/f104fcb3ea90ff013499dfe97d89cafbd2e416d84e6d6790d7597157d2ab/swanlab-0.10.0-py3-none-any.whl", hash = "sha256:5467143d68925ee0968e3409174fbf25958a7736b0c6f347c90aabaf257f9057", size = 533527, upload-time = "2026-09-01T07:02:23.472Z" },
 ]
+
+[[package]]
+name = "step-distillation"
+version = "0.1.0"
+source = { editable = "research/step_distillation" }
+dependencies = [
+    { name = "just-grpo" },
+    { name = "nemo-rl" },
+]
+
+[package.dev-dependencies]
+test = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "just-grpo", editable = "research/just_grpo" },
+    { name = "nemo-rl", editable = "." },
+]
+
+[package.metadata.requires-dev]
+test = [{ name = "pytest", specifier = ">=7.0.0" }]
 
 [[package]]
 name = "sympy"

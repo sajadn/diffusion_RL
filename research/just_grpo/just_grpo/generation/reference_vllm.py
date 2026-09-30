@@ -13,6 +13,7 @@
 # limitations under the License.
 """Reference diffusion sampling on NeMo-RL's native vLLM worker."""
 
+from collections import Counter
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -78,6 +79,19 @@ class _ReferenceDiffusionSampling:
             raise ValueError(
                 "Reference vLLM must return a reveal step per generated token"
             )
+        if diffusion["selection_policy"] == "entropy":
+            block = diffusion["canvas_length"]
+            count = block // diffusion["max_denoising_steps"]
+            if block % diffusion["max_denoising_steps"] == 0:
+                for start in range(0, len(recorded), block):
+                    events = recorded[start : start + block]
+                    if len(events) == block and (
+                        len(set(events)) != diffusion["max_denoising_steps"]
+                        or any(n != count for n in Counter(events).values())
+                    ):
+                        raise ValueError(
+                            "Recorded entropy reveal schedule differs from requested fixed count"
+                        )
         steps = torch.full((padded_length,), -1, dtype=torch.long)
         steps[input_length : input_length + len(recorded)] = torch.tensor(recorded)
         tokens = list(completion.token_ids)

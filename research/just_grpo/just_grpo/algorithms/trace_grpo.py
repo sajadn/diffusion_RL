@@ -134,24 +134,32 @@ class TraceGRPO:
         levels = torch.full_like(steps, -1)
         for row in range(ids.shape[0]):
             committed = response[row] & (steps[row] >= 0)
-            distinct = torch.unique(steps[row, committed], sorted=True)
-            levels[row, committed] = torch.searchsorted(distinct, steps[row, committed])
+            next_level = 0
+            block_size = self.config.schedule.block_size
+            for start in range(0, ids.shape[1], block_size):
+                local = committed[start : start + block_size]
+                recorded = steps[row, start : start + block_size][local]
+                distinct = torch.unique(recorded, sorted=True)
+                levels[row, start : start + block_size][local] = (
+                    next_level + torch.searchsorted(distinct, recorded)
+                )
+                next_level += distinct.numel()
         config = self.config.schedule
         seeds = (
             config.seed_base
             + step * 1_000_003
             + torch.arange(ids.shape[0], device=ids.device)
         )
+        data["trace_reveal_levels"] = levels
+        data["trace_loss_mask"] = loss_mask
         selected, weights = sample_trace_levels(
             levels,
             num_level_samples=config.num_level_samples,
             seeds=seeds,
             reduction=config.sampled_level_reduction,
         )
-        data["trace_reveal_levels"] = levels
         data["trace_sampled_levels"] = selected
         data["trace_loss_weights"] = weights
-        data["trace_loss_mask"] = loss_mask
 
 
 class TraceGRPOSchedule(DenoisingSchedule):
@@ -214,7 +222,11 @@ class TraceGRPOSchedule(DenoisingSchedule):
         return result
 
 
-def validate_trace_experiment(config: Any) -> None:
+def validate_trace_experiment(
+    config: Any,
+    *,
+    worker_cls_fqn: str = "just_grpo.algorithms.trace_grpo_policy_worker.TraceGRPOPolicyWorker",
+) -> None:
     """Reject controller features that require full-response policy scores."""
     if config.grpo.seq_logprob_error_threshold is not None:
         raise ValueError(
@@ -222,8 +234,5 @@ def validate_trace_experiment(config: Any) -> None:
         )
     if (config.get("data_plane") or {}).get("enabled"):
         raise ValueError("Trace batch preparation requires the driver rollout path")
-    if (
-        config.policy.worker_extension_cls_fqn
-        != "just_grpo.algorithms.trace_grpo_policy_worker.TraceGRPOPolicyWorker"
-    ):
-        raise ValueError("Trace requires TraceGRPOPolicyWorker")
+    if config.policy.worker_extension_cls_fqn != worker_cls_fqn:
+        raise ValueError(f"Trace requires {worker_cls_fqn}")

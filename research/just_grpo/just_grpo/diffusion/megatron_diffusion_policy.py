@@ -33,7 +33,7 @@ from just_grpo.diffusion.diffusion_processors import (
     prepare_diffusion_microbatch,
 )
 from just_grpo.generation.megatron_generation import generate_responses, pack_responses
-from nemo_rl.algorithms.loss.interfaces import LossFunction
+from nemo_rl.algorithms.loss.interfaces import LossFunction, LossInputType
 from nemo_rl.data.interfaces import TokenizerType
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.models.megatron.train import model_forward
@@ -177,6 +177,27 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
         if eval_mode:
             raise ValueError("Use get_logprobs for diffusion scoring")
         data.to("cuda")
+        if loss_fn.input_type == LossInputType.LOGIT:
+            included = data["sample_mask"].sum()
+            torch.distributed.all_reduce(
+                included, group=parallel_state.get_data_parallel_group()
+            )
+            if included == 0:
+                # No positive eligible rows anywhere: do not apply Adam momentum
+                # or weight decay, or advance the scheduler on an empty batch.
+                return {
+                    "global_loss": torch.tensor(0.0),
+                    "grad_norm": torch.tensor([0.0]),
+                    "rank": torch.distributed.get_rank(),
+                    "gpu_name": torch.cuda.get_device_name(),
+                    "model_dtype": self.dtype,
+                    "all_mb_metrics": {
+                        "loss": [0.0],
+                        "num_valid_samples": [0.0],
+                        "global_valid_toks": [0.0],
+                        "global_valid_seqs": [0.0],
+                    },
+                }
         schedule = self._build_schedule(data, purpose="train")
         local_tokens = torch.zeros((), device=data["input_ids"].device)
         self.begin_train_step(loss_fn, gbs=gbs, mbs=mbs)
@@ -198,6 +219,8 @@ class MegatronDiffusionPolicyWorkerImpl(MegatronPolicyWorkerImpl):
             count / schedule.num_steps
             for count in result["all_mb_metrics"]["global_valid_seqs"]
         ]
+        if loss_fn.input_type == LossInputType.LOGIT:
+            return result
         kl = (
             sum(result["all_mb_metrics"]["gen_kl_error"])
             * result["all_mb_metrics"]["global_valid_toks"][0]
