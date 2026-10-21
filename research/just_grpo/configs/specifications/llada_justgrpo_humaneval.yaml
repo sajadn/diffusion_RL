@@ -1,0 +1,168 @@
+# Paper/released-code specification, NOT a runnable NeMo-RL or evalctl config.
+# Train on AceCode-Hard; use HumanEval only for held-out evaluation.
+schema_version: 1
+kind: experiment_specification
+name: llada_8b_justgrpo_code_humaneval
+
+sources:
+  paper: https://arxiv.org/html/2601.15165v3
+  repository: https://github.com/LeapLabTHU/JustGRPO
+  revision: 1a2fddb5c6655597e63081c0af5ebb718a849f39
+  training: [train.py, grpo.py, data/code.py, data/local_sandbox.py]
+  evaluation: [eval.py, utils/generate.py, utils/code_exec.py]
+
+model:
+  name: GSAI-ML/LLaDA-8B-Instruct
+  tokenizer: GSAI-ML/LLaDA-8B-Instruct
+  precision: bfloat16
+  trust_remote_code: true
+  attention: fully_bidirectional
+  mask_token_id: 126336
+  finetuning: full
+  activation_checkpointing: whole_layer
+
+training:
+  dataset:
+    name: AceCode-Hard
+    # Paper describes approximately 21K challenging AceCoder-87K examples.
+    source: https://drive.google.com/file/d/1eyxdcLRiEI0Km9ohaGxah0hj53iUWuMA/view
+    path: null  # Set to the downloaded acecode_hard.jsonl; not yet verified.
+    format: jsonl
+    question_field: question
+    tests_field: test_cases
+    shuffle_seed: 112
+    prompt_preprocessing: >-
+      Use question unchanged unless it lacks newline + three backticks +
+      newline and has tests; then append newline + "Test cases: " + test_cases[0].
+    # The reference has no explicit prompt-length cap. Do not inherit GSM8K's 768.
+    max_prompt_tokens: null
+  prompt:
+    system: null
+    messages: single_user
+    chat_template: native_tokenizer
+    add_generation_prompt: true
+  seed: 1234
+  algorithm: GRPO
+  updates: 125
+  prompts_per_update: 64
+  completions_per_prompt: 16
+  completions_per_update: 1024
+  policy_updates_per_rollout: 1
+  # Reference samples two chunks of eight, normalizing over all sixteen.
+  generation_chunk_size: 8
+  generation_chunks_per_prompt: 2
+  optimizer:
+    name: AdamW
+    learning_rate: 5.0e-6
+    betas: [0.9, 0.999]
+    epsilon: 1.0e-8
+    weight_decay: 0.0
+    max_grad_norm: 1.0
+    scheduler: constant
+  loss:
+    kl_coefficient: 0.0
+    clip_epsilon: 0.2
+    group_advantage: sample_std_normalization
+    advantage_epsilon: 1.0e-4
+    # Preserve these released-code details when adapting to NeMo-RL.
+    ratio: exp_logprob_minus_detached_logprob
+    normalization: completion_length_times_nonzero_advantage_count
+    normalization_epsilon: 1.0e-5
+    scored_positions: all_256_response_positions
+    fast_entropy_selection: false
+  generation:
+    order: left_to_right
+    block_length: 1
+    gen_length: 256
+    steps: 256
+    temperature: 1.0
+    sampling: float64_gumbel_max
+    cfg_scale: 0.0
+    stop_on_eos: false
+    # All future response positions remain visible as masks, including future blocks.
+    canvas: full_prompt_plus_256_response_positions
+    causal_kv_cache: false
+  reward:
+    total: format_reward_plus_unit_test_pass_rate
+    # Exact accepted structure is defined by data/code.py at the pinned revision.
+    format_regex: '^(?:(?!```)[\s\S])*?```python\n(?:(?!```)[\s\S])*?```\n?$'
+    valid_code_block_and_python_syntax: 1.0
+    valid_code_block_with_syntax_error: 0.5
+    invalid_code_block: 0.0
+    evaluate_tests_only_when_format_reward: 1.0
+    correctness: fraction_of_unit_tests_passed
+    test_timeout_seconds: 1.0
+    test_workers: 4
+    range: [0.0, 2.0]
+  save_every_updates: 10
+  hardware:
+    # Paper hardware, not an allocation request. Released README also shows 8 GPUs.
+    paper_gpus: 16
+    paper_gpu_type: NVIDIA_H100
+    prompts_per_device_microbatch: 1
+    gradient_accumulation_for_16_data_parallel_ranks: 4
+
+evaluation:
+  repository: nld-eval-next
+  benchmark: HumanEval
+  dataset:
+    source: https://raw.githubusercontent.com/LeapLabTHU/JustGRPO/1a2fddb5c6655597e63081c0af5ebb718a849f39/datasets/HumanEval.jsonl.gz
+    sha256: b796127e635a67f93fb35c04f4cb03cf06f38c8072ee7cee8833d7bee06979ef
+    unique_problems: 164
+    split: test
+  checkpoint_path: null  # Set to the trained checkpoint being evaluated.
+  tokenizer: GSAI-ML/LLaDA-8B-Instruct
+  seed: 113
+  samples_per_problem: 1
+  metric: pass@1
+  batch_size_per_replica: 1
+  prompt:
+    system: null
+    chat_template: native_tokenizer
+    add_generation_prompt: true
+    # Substitute entry_point and the original dataset prompt with trailing whitespace removed.
+    user_template: |
+      You are an expert Python programmer. Your task is to complete the implementation of a function named `{entry_point}`.
+
+      Here is the function to complete:
+      ```python
+      {prompt_rstrip}
+      ```
+  generation:
+    gen_length: 256
+    steps: 256
+    block_length: 32
+    temperature: 0.0
+    remasking: low_confidence
+    cfg_scale: 0.0
+    stop_on_eos: false
+    canvas: full_prompt_plus_256_response_positions
+    causal_kv_cache: false
+    # At steps == gen_length, reveal one highest-confidence token per forward.
+  grading:
+    skip_special_tokens: true
+    extraction: first_python_fenced_block_stripped_else_raw_completion
+    test_program: original_prompt_plus_extracted_code_plus_tests_plus_check_entry_point
+    timeout_seconds: 3.0
+    workers: 8
+    require_all_164_unique_problems: true
+    discard_distributed_padding_rows: true
+  # Additional lengths in paper Table 1; independent evaluations, same block length.
+  optional_generation_lengths: [128, 512]
+  optional_steps_equal_generation_length: true
+
+integration:
+  status: specification_only
+  runnable: false
+  training_repository: /lustre/fsw/portfolios/coreai/users/snorouzi/RL-Rebase/RL-research
+  training_branch: research/trace-grpo-review-stack
+  training_source_revision: 873b4b5a4be701e7a227016b59e1e6830d0aac15
+  training_entrypoint: research/just_grpo/run_just_grpo.py
+  # Migrated LLaDA support is present in this checkout; do not use the old worktree.
+  llada_support_commit: 2d268aac3
+  missing:
+    - NeMo-RL AceCode-Hard data processor and reference-compatible code reward.
+    - Audit NeMo-RL advantage and loss normalization against released grpo.py.
+    - Roman evaluator LLaDA decoder and HumanEval prompt/grader recipe.
+    - Verified local training dataset and selected trained checkpoint paths.
+  jobs_submitted: false
