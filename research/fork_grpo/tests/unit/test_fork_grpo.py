@@ -242,7 +242,6 @@ def test_recipe_and_invalid_backend() -> None:
     assert loaded.data.validation.dataset_name == "AIME2024"
     assert loaded.data.default.env_name == "math"
     assert set(loaded.env) == {"math"}
-    assert list(recipe.parent.glob("*.yaml")) == [recipe]
     bad = config().model_dump()
     bad["runtime"] = "upstream_vllm"
     with pytest.raises(ValueError, match="reference vLLM generation"):

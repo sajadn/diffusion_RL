@@ -48,7 +48,7 @@ uv run --all-packages --extra mcore python research/fork_grpo/run_fork_grpo.py \
   logger.log_dir=/path/to/fresh/results
 ```
 
-The single recipe trains Nemotron-3B on DeepScaleR and validates on AIME2024,
+The DeepScaleR recipe trains Nemotron-3B on DeepScaleR and validates on AIME2024,
 using four nodes, 4K context, and 100 optimizer steps. It is an implementation baseline, not a reproduction
 of the paper's LLaDA LoRA results. The recipe uses two training nodes and two
 asynchronous vLLM generation nodes, with training microbatch 2 and logprob batch 4.
@@ -60,6 +60,15 @@ Megatron diffusion worker. The recipe disables the reference KL penalty.
 
 For provisioned interpreters, add the repository, `research/block_diffusion`, and
 `research/fork_grpo` and `research/trace_grpo` to `PYTHONPATH`.
+
+For MATH-12K training and MATH-500 validation, use
+`configs/recipes/fork_grpo-math12k-3b-4n8g-megatron-vllm-async-long.yaml`
+and set `MATH12K_DATA_DIR` to the prepared `train.jsonl` and `test.jsonl` directory.
+Both files need `problem` and `answer` fields. This recipe uses a 2,048-token
+prompt limit, 6,144-token context, and the same 3,744-token generation budget.
+It validates all 500 problems once each at temperature 0.6, at the start, every
+10 updates, and at the end. Checkpoints are saved every 10 updates, with a
+3-hour-30-minute save deadline for the four-hour allocation.
 
 ## Tests
 
