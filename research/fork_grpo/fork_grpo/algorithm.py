@@ -11,19 +11,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Replay every Fork-dLLM fallback decision using its recorded masked state."""
+"""Sample Fork-dLLM fallback decisions and replay their recorded masked states."""
 
 from typing import Any, Self
 
 import torch
-from block_diffusion.config import DiffusionExperimentConfig
+from block_diffusion.block_layout import BlockDiffusionLayout
+from block_diffusion.config import BlockDiffusionConfig, DiffusionExperimentConfig
 from block_diffusion.replay import recorded_reveal_states
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
 
+class ForkScheduleConfig(BlockDiffusionConfig, extra="forbid"):
+    """Number of replay views and seed for uniform per-block fallback sampling."""
+
+    num_level_samples: int = Field(gt=0)
+    seed_base: int
+
+
 class ForkGRPOConfig(DiffusionExperimentConfig):
+    schedule: ForkScheduleConfig
+
     @model_validator(mode="after")
     def validate_fork(self) -> Self:
         if self.runtime not in {"megatron", "reference_vllm"}:
@@ -80,22 +90,43 @@ class ForkGRPO:
         if (fallback & (levels < 0)).any():
             raise ValueError("Fallback tokens must have recorded reveal steps")
         fallback &= loss_mask
-        # Levels restart per block. Replay matching levels across blocks together;
-        # the shared asymmetric attention supplies clean earlier blocks.
-        selected = [
-            torch.unique(levels[row, fallback[row]], sorted=True)
-            for row in range(data.size)
-        ]
-        views = max(1, max(len(values) for values in selected))
+        config = self.config.schedule
+        layout = BlockDiffusionLayout(
+            data, block_size=config.block_size, pad_token_id=config.mask_token_id
+        )
+        positions = layout.base["original_positions"]
+        block_levels = levels.gather(1, positions)
+        block_fallback = fallback.gather(1, positions) & layout.response_mask
+        num_blocks = positions.shape[1] // config.block_size
         sampled = torch.full(
-            (data.size, views),
+            (data.size, config.num_level_samples, num_blocks),
             self.config.sampling.max_steps,
             device=levels.device,
             dtype=torch.long,
         )
-        for row, values in enumerate(selected):
-            sampled[row, : len(values)] = values
+        weights = torch.zeros(
+            (data.size, num_blocks), device=levels.device, dtype=torch.float32
+        )
+        totals = block_fallback.sum(1).clamp_min(1)
+        for row in range(data.size):
+            seed = config.seed_base + step * 1_000_003 + row
+            generator = torch.Generator().manual_seed(seed & 0x7FFFFFFFFFFFFFFF)
+            for block in range(num_blocks):
+                span = slice(block * config.block_size, (block + 1) * config.block_size)
+                values = block_levels[row, span][block_fallback[row, span]]
+                count = values.numel()
+                if count == 0:
+                    continue
+                if values.unique().numel() != count:
+                    raise ValueError("Fork requires one fallback token per block level")
+                selected_count = min(config.num_level_samples, count)
+                selected = torch.randperm(count, generator=generator)[:selected_count]
+                sampled[row, :selected_count, block] = values[
+                    selected.to(values.device)
+                ]
+                # Inverse inclusion probability preserves the full fallback mean.
+                weights[row, block] = count / selected_count / totals[row]
         data["trace_reveal_levels"] = levels
         data["trace_loss_mask"] = fallback
         data["trace_sampled_levels"] = sampled
-        data["trace_loss_weights"] = fallback.sum(1).clamp_min(1).float().reciprocal()
+        data["trace_loss_weights"] = weights

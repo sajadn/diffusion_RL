@@ -1,3 +1,30 @@
+# Three-view fallback replay verification (2026-10-21)
+
+- **140 CPU tests passed** across ForkGRPO, TraceGRPO, the shared schedule, and
+  Megatron generation. Ruff (including import order), formatting, and diff checks
+  passed for changed Python files.
+- Fork tests cover 1, 3, and 4 replay views, prompt offsets, sampled-token
+  generation-logprob parity, scoring/training context parity, per-block masking,
+  exact coverage of small fallback sets, finite zero-loss views, and fixed view
+  counts on empty DP shards.
+- An enumerated four-subset test checks that inverse-inclusion weights reproduce
+  the full fallback mean in expectation. Every sampled response has total loss
+  weight one; draws reproduce exactly for the same seed and update.
+- The single DeepScaleR recipe uses three replay views and retains 16 generation
+  denoising steps. The shared `TraceGRPOSchedule` accepts per-block selected levels
+  and weights while preserving its original per-response interface.
+- Real GPU validation is performed by the two-update vLLM smoke in the submitted
+  job before the production run. CPU success does not establish GPU performance.
+
+```bash
+PYTHONPATH=.:research/fork_grpo:research/trace_grpo:research/block_diffusion:research/just_grpo \
+OMP_NUM_THREADS=1 uv run --no-project --python "$TEST_PYTHON" python -m pytest \
+  -q -c research/fork_grpo/pyproject.toml \
+  research/fork_grpo/tests/unit research/trace_grpo/tests/unit \
+  research/just_grpo/tests/unit/test_schedule.py \
+  research/just_grpo/tests/unit/test_megatron_generation.py --confcutdir=research
+```
+
 # ForkGRPO verification (2026-10-19)
 
 - ForkGRPO, TraceGRPO, shared Megatron generation, native vLLM metadata,

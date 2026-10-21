@@ -47,7 +47,9 @@ def config() -> ForkGRPOConfig:
         distributed=True,
         sampling=sampling,
         validation_sampling=sampling,
-        schedule=dict(mask_token_id=31, block_size=4),
+        schedule=dict(
+            mask_token_id=31, block_size=4, num_level_samples=3, seed_base=42
+        ),
     )
 
 
@@ -56,6 +58,7 @@ def prepare(
     responses: list[dict],
     cfg: ForkGRPOConfig,
     stops: list[int],
+    step: int = 0,
 ) -> BatchedDataDict:
     packed = pack_responses(
         prompts, responses, pad_token_id=0, max_new_tokens=8, stop_token_ids=stops
@@ -82,7 +85,7 @@ def prepare(
         sample_mask=torch.ones(len(prompts)),
         generation_logprobs=packed["logprobs"],
     )
-    ForkGRPO(cfg, stop_token_ids=stops).prepare_training_data(data, messages, 0)
+    ForkGRPO(cfg, stop_token_ids=stops).prepare_training_data(data, messages, step)
     return data
 
 
@@ -113,10 +116,12 @@ def test_fork_parallel_then_leftmost_with_raw_confidence() -> None:
 
 
 @pytest.mark.parametrize("prompt_length", [1, 3, 5])
-def test_fallback_logprobs_match_generation(prompt_length: int) -> None:
+@pytest.mark.parametrize("views", [1, 3, 4])
+def test_fallback_logprobs_match_generation(prompt_length: int, views: int) -> None:
     torch.manual_seed(7)
     model = TinyDiffusion()
     cfg = config()
+    cfg.schedule.num_level_samples = views
     prompts = [[1] * prompt_length, [2] * prompt_length]
     responses = sample_batch(
         TinyDoubled(model),
@@ -143,7 +148,15 @@ def test_fallback_logprobs_match_generation(prompt_length: int) -> None:
     )
     active = scores["logprob_token_mask"]
     assert active.any()
-    torch.testing.assert_close(active, data["trace_loss_mask"])
+    assert schedule.num_steps == views
+    assert not (active & ~data["trace_loss_mask"]).any()
+    if views == cfg.schedule.block_size:
+        torch.testing.assert_close(active, data["trace_loss_mask"])
+    for row in range(data.size):
+        for start in range(prompt_length, prompt_length + 8, 4):
+            assert active[row, start : start + 4].sum() == min(
+                views, int(data["trace_loss_mask"][row, start : start + 4].sum())
+            )
     torch.testing.assert_close(
         scores["logprobs"][active],
         data["generation_logprobs"][active],
@@ -187,7 +200,7 @@ def test_mixed_empty_rollouts_and_terminal_context() -> None:
     empty_shard = TraceGRPOSchedule(
         data.slice(1, 2), cfg.schedule, pad_token_id=0, weighted_loss=True
     )
-    assert schedule.num_steps == empty_shard.num_steps == 2
+    assert schedule.num_steps == empty_shard.num_steps == 3
     assert all(view["token_mask"].sum() == 0 for view in empty_shard.iter_levels())
     views = list(schedule.iter_levels())
     assert sum(view["token_mask"].sum() for view in views) == 1
@@ -207,7 +220,7 @@ def test_no_fallback_has_finite_zero_loss_views() -> None:
     )
     data = prepare([[1]], [response], cfg, [])
     schedule = TraceGRPOSchedule(data, cfg.schedule, pad_token_id=0, weighted_loss=True)
-    assert schedule.num_steps == 1
+    assert schedule.num_steps == 3
     view = next(schedule.iter_levels())
     assert torch.isfinite(view["token_mask"]).all()
     assert view["token_mask"].sum() == 0
@@ -223,6 +236,8 @@ def test_recipe_and_invalid_backend() -> None:
     validate_config(loaded)
     # Prefix KV from the previous weights must not survive an async refit.
     assert loaded.grpo.async_grpo.recompute_kv_cache_after_weight_updates
+    assert loaded.fork_grpo.schedule.num_level_samples == 3
+    assert loaded.fork_grpo.sampling.max_steps == 16
     assert loaded.data.train.dataset_name == "DeepScaler"
     assert loaded.data.validation.dataset_name == "AIME2024"
     assert loaded.data.default.env_name == "math"
@@ -343,3 +358,53 @@ def test_missing_fallback_metadata_fails() -> None:
     ]
     with pytest.raises(ValueError, match="fallback metadata"):
         ForkGRPO(config(), stop_token_ids=[]).prepare_training_data(data, messages, 0)
+
+
+@pytest.mark.parametrize("prompt_length", [1, 3, 5])
+def test_per_block_sampling_is_reproducible_and_unbiased(prompt_length: int) -> None:
+    cfg = config()
+    response = dict(
+        token_ids=list(range(4, 12)),
+        logprobs=[-1.0] * 8,
+        reveal_steps=[0, 1, 2, 3, 0, 1, 0, 2],
+        fallback_mask=[True] * 4 + [False, True, False, True],
+        response_length=8,
+    )
+    estimates = {}
+    for step in range(32):
+        data = prepare([[1] * prompt_length], [response], cfg, [], step=step)
+        repeat = prepare([[1] * prompt_length], [response], cfg, [], step=step)
+        torch.testing.assert_close(
+            data["trace_sampled_levels"], repeat["trace_sampled_levels"]
+        )
+        schedule = TraceGRPOSchedule(
+            data, cfg.schedule, pad_token_id=0, padded_width=16, weighted_loss=True
+        )
+        assert schedule.num_steps == 3
+        token_weights = torch.zeros(8)
+        for view in schedule.iter_levels():
+            token_weights += view["token_mask"][0, :8]
+        for index, view in enumerate(schedule.iter_levels()):
+            chosen = data["trace_sampled_levels"][0, index].repeat_interleave(4)
+            expected_mask = torch.tensor(response["reveal_steps"]) >= chosen
+            torch.testing.assert_close(view["masked_indices"][0, :8], expected_mask)
+        selected = (token_weights[:4] != 0).nonzero().flatten().tolist()
+        assert len(selected) == 3
+        torch.testing.assert_close(token_weights[selected], torch.full((3,), 4 / 3 / 6))
+        torch.testing.assert_close(token_weights[[5, 7]], torch.full((2,), 1 / 6))
+        assert token_weights[[4, 6]].sum() == 0
+        torch.testing.assert_close(token_weights.sum(), torch.tensor(1.0))
+        # Enumerate the four possible subsets, then average their loss estimates.
+        losses = torch.tensor([1.0, 2.0, 4.0, 8.0, 0.0, 16.0, 0.0, 32.0])
+        estimates[tuple(selected)] = (losses * token_weights).sum()
+    assert len(estimates) == 4
+    torch.testing.assert_close(
+        torch.stack(list(estimates.values())).mean(), torch.tensor(63 / 6)
+    )
+
+
+def test_replay_count_must_be_positive() -> None:
+    cfg = config().model_dump()
+    cfg["schedule"]["num_level_samples"] = 0
+    with pytest.raises(ValueError, match="num_level_samples"):
+        ForkGRPOConfig.model_validate(cfg)

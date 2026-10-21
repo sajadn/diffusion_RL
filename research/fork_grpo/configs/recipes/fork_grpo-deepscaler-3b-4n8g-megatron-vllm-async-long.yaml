@@ -106,6 +106,9 @@ fork_grpo:
   schedule:
     mask_token_id: 100
     block_size: 16
+    # Replay up to three uniformly sampled fallback decisions per block.
+    num_level_samples: 3
+    seed_base: 42
   sampling:
     temperature: ${policy.generation.temperature}
     block_size: ${fork_grpo.schedule.block_size}

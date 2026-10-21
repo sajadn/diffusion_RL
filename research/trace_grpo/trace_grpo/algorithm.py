@@ -127,6 +127,8 @@ class TraceGRPO:
 class TraceGRPOSchedule(DenoisingSchedule):
     """Replay prepared levels, loss masks, and weights for TraceGRPO or ForkGRPO.
 
+    Selected levels can be per response [N,K] or per response block [N,K,B].
+    Block weights have shape [N,B]; response weights have shape [N].
     The prepared view count survives DP slicing, including empty shards.
     """
 
@@ -162,8 +164,24 @@ class TraceGRPOSchedule(DenoisingSchedule):
             data["trace_loss_mask"].gather(1, positions) & self.layout.response_mask
         )
         self.sampled = data["trace_sampled_levels"]
-        if self.sampled.ndim != 2 or self.sampled.shape[0] != data.size:
-            raise ValueError("Selected levels must have shape [batch, views]")
+        if self.sampled.ndim not in (2, 3) or self.sampled.shape[0] != data.size:
+            raise ValueError("Selected levels must have shape [N,K] or [N,K,B]")
+        self.block_indices = None
+        if self.sampled.ndim == 3:
+            num_blocks = self.sampled.shape[2]
+            if (
+                num_blocks * config.block_size
+                < int(self.layout.base["noisy_valid_lengths"].max())
+                or num_blocks == 0
+            ):
+                raise ValueError("Selected block levels must cover the response canvas")
+            # Fixed-width worker padding can exceed the driver's response canvas.
+            self.block_indices = (
+                torch.arange(positions.shape[1], device=positions.device)
+                .div(config.block_size, rounding_mode="floor")
+                .clamp_max(num_blocks - 1)
+                .expand(data.size, -1)
+            )
         if (
             isinstance(config, TraceScheduleConfig)
             and self.sampled.shape[1] != config.num_level_samples
@@ -174,19 +192,37 @@ class TraceGRPOSchedule(DenoisingSchedule):
             if weighted_loss
             else torch.ones_like(data["trace_loss_weights"])
         )
+        expected_weights = (
+            (data.size,)
+            if self.sampled.ndim == 2
+            else (data.size, self.sampled.shape[2])
+        )
+        if self.weights.shape != expected_weights:
+            raise ValueError(
+                "Loss weights must match the selected response/block levels"
+            )
+        self.weights = (
+            self.weights[:, None]
+            if self.block_indices is None
+            else self.weights.gather(1, self.block_indices)
+        )
         super().__init__(num_steps=self.sampled.shape[1], num_samples=data.size)
 
     def generate_single_trajectory(self, time_step: int) -> BatchedDataDict[Any]:
         if not 0 <= time_step < self.num_steps:
             raise IndexError(time_step)
-        chosen = self.sampled[:, time_step, None]
+        chosen = (
+            self.sampled[:, time_step, None]
+            if self.block_indices is None
+            else self.sampled[:, time_step].gather(1, self.block_indices)
+        )
         result = BatchedDataDict(self.layout.base)
         result["masked_indices"] = self.layout.canvas_mask & (
             (self.levels < 0) | (self.levels >= chosen)
         )
         result["token_mask"] = (
             self.loss_mask & (self.levels == chosen)
-        ).float() * self.weights[:, None]
+        ).float() * self.weights
         return result
 
 
