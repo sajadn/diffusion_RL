@@ -11,7 +11,7 @@ grpo:
 
 checkpointing:
   save_period: 1
-  checkpoint_must_save_by: "00:01:45:00"
+  checkpoint_must_save_by: "00:00:45:00"
 
 logger:
   wandb_enabled: false
