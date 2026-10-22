@@ -1,0 +1,19 @@
+# AceCode-Hard training and HumanEval validation on 128 GPUs.
+defaults: just_grpo-acecode-llada8b-2n8g-megatron-humaneval-long.yaml
+
+grpo:
+  # Two batches cover all 164 tasks; the final batch is partial.
+  val_batch_size: 128
+  max_val_samples: 256
+
+just_grpo:
+  generation_batch_size: 4
+
+policy:
+  train_micro_batch_size: 8
+  logprob_batch_size: 8
+  max_total_sequence_length: 1536
+
+cluster:
+  num_nodes: 16
+  gpus_per_node: 8
