@@ -3,28 +3,13 @@
 defaults: ar_grpo_superv3_exp544_step100_helpful_128k_ready_first_tp2_cp8_300steps.yaml
 
 policy:
-  max_total_sequence_length: 131072
   tokenizer:
     chat_template_kwargs:
       reasoning_budget: 55296
-  megatron_cfg:
-    model_overrides:
-      seq_length: 131072
-  dynamic_batching:
-    train_mb_tokens: 131072
-    logprob_mb_tokens: 131072
-  sequence_packing:
-    train_mb_tokens: 131072
-    logprob_mb_tokens: 131072
   generation:
     max_new_tokens: 65536
-    vllm_cfg:
-      max_model_len: 131072
     mcore_generation_config:
-      max_model_len: 131072
       max_tokens: 65536
-    sglang_cfg:
-      context_length: 131072
 
 grpo:
   reward_shaping:
