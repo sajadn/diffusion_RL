@@ -117,3 +117,34 @@ def test_code_recipe_sampling_uses_llada_validation_adapter(monkeypatch, mode):
     cfg.policy.generation.val_temperature = 0.0
     with pytest.raises(ValueError, match="just_grpo.validation_sampling"):
         validate_config(cfg)
+
+
+def test_training_reward_ignores_stdout_from_generated_code():
+    # The reference guard disables print(), but generated code can write directly.
+    rows = [
+        {
+            "kind": "acecode",
+            "test_cases": ["assert f() == 1"],
+            "completion": (
+                "```python\nimport sys\n"
+                "sys.stdout.write('candidate output\\n')\n"
+                "sys.stdout.flush()\n"
+                "def f(): return 1\n```"
+            ),
+        }
+    ]
+    assert score_chunk(rows, config()) == [2.0]
+
+
+def test_empty_reward_batch():
+    assert score_chunk([], config()) == []
+
+
+def test_missing_reward_file_fails_even_with_json_stdout(monkeypatch, tmp_path):
+    from just_grpo.environments import code_reference
+
+    worker = tmp_path / "code_reference_worker.py"
+    worker.write_text("print('[2.0]')\n")
+    monkeypatch.setattr(code_reference, "__file__", str(tmp_path / "adapter.py"))
+    with pytest.raises(RuntimeError, match="did not produce a valid reward result"):
+        score_chunk([{"kind": "acecode", "completion": ""}], config())

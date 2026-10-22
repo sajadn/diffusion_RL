@@ -71,8 +71,9 @@ def score_chunk(rows: list[dict[str, Any]], cfg: CodeReferenceConfig) -> list[fl
     """Run the reference in an isolated working directory and process group."""
     worker = Path(__file__).with_name("code_reference_worker.py")
     with tempfile.TemporaryDirectory(prefix="justgrpo_code_") as cwd:
+        result_path = Path(cwd) / "scores.json"
         with subprocess.Popen(
-            [cfg.python_executable, str(worker), cfg.reference_dir],
+            [cfg.python_executable, str(worker), cfg.reference_dir, str(result_path)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -93,12 +94,22 @@ def score_chunk(rows: list[dict[str, Any]], cfg: CodeReferenceConfig) -> list[fl
                 )
             if process.returncode:
                 raise RuntimeError(f"JustGRPO reference grader failed: {error[-4000:]}")
-    scores = json.loads(output)
-    if len(scores) != len(rows) or any(
-        not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or not 0 <= value <= (1 if row["kind"] == "humaneval" else 2)
-        for value, row in zip(scores, rows, strict=True)
+        try:
+            scores = json.loads(result_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                "JustGRPO reference grader did not produce a valid reward result; "
+                f"stdout={output[-4000:]!r}; stderr={error[-4000:]!r}"
+            ) from exc
+    if (
+        not isinstance(scores, list)
+        or len(scores) != len(rows)
+        or any(
+            not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not 0 <= value <= (1 if row["kind"] == "humaneval" else 2)
+            for value, row in zip(scores, rows, strict=True)
+        )
     ):
         raise ValueError("Invalid scores from JustGRPO reference grader")
     return scores

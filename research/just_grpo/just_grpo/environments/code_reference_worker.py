@@ -15,14 +15,12 @@
 
 import json
 import sys
+from pathlib import Path
 
 
-def main() -> None:
-    rows = json.load(sys.stdin)
-    sys.path.insert(0, sys.argv[1])
+def score_rows(rows: list[dict]) -> list[float]:
     if not rows:
-        print("[]")
-        return
+        return []
     kinds = {row["kind"] for row in rows}
     if len(kinds) != 1:
         raise ValueError("A grading chunk must contain exactly one task type")
@@ -49,7 +47,17 @@ def main() -> None:
             scores.append(float(result["passed"]))
     else:
         raise ValueError(f"Unsupported task types: {kinds}")
-    print(json.dumps(scores))
+    return scores
+
+
+def main() -> None:
+    rows = json.load(sys.stdin)
+    sys.path.insert(0, sys.argv[1])
+    result_path = Path(sys.argv[2])
+    scores = score_rows(rows)
+    # Candidate code and the reference grader may write arbitrary stdout.
+    # Keep the reward protocol separate from those diagnostic streams.
+    result_path.write_text(json.dumps(scores))
 
 
 if __name__ == "__main__":
