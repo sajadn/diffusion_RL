@@ -1,8 +1,12 @@
-# 128K total context, 54K thinking, 64K output; packed ready-first AR GRPO.
+# 128K total context, 54K thinking, 64K output; unpacked ready-first AR GRPO, MBS2.
 # Preserve the 300-update target and TP2 / CP8 / DP4 training topology.
 defaults: ar_grpo_superv3_exp544_step100_helpful_128k_ready_first_tp2_cp8_300steps.yaml
 
 policy:
+  train_micro_batch_size: 2
+  logprob_batch_size: 2
+  sequence_packing:
+    enabled: false
   tokenizer:
     chat_template_kwargs:
       reasoning_budget: 55296
