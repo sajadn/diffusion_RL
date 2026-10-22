@@ -1501,8 +1501,9 @@ class TestLogprobsPostProcessor:
         "nemo_rl.models.megatron.train.get_tensor_model_parallel_rank", return_value=0
     )
     @patch("nemo_rl.models.megatron.train.from_parallel_logits_to_logprobs")
+    @patch("nemo_rl.models.megatron.train.get_context_parallel_group")
     def test_logprobs_post_processor_no_packing(
-        self, mock_from_logits, mock_tp_rank, mock_tp_grp
+        self, mock_cp_grp, mock_from_logits, mock_tp_rank, mock_tp_grp
     ):
         """Test LogprobsPostProcessor without sequence packing."""
         from nemo_rl.models.megatron.train import LogprobsPostProcessor
@@ -1530,6 +1531,7 @@ class TestLogprobsPostProcessor:
 
         output_tensor = torch.randn(1, 8, 100)
         loss, result = wrapped_fn(output_tensor)
+        assert mock_from_logits.call_args.kwargs["cp_group"] is mock_cp_grp.return_value
 
         # Loss should be 0
         assert loss.item() == 0.0

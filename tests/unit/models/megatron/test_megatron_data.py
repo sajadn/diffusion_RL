@@ -2320,3 +2320,45 @@ def test_get_pack_sequence_parameters_for_megatron(get_pack_sequence_parameters_
         # Check that all workers succeeded
         for i, result in enumerate(results):
             assert result["success"], f"Worker {i} failed: {result['error']}"
+
+
+@pytest.mark.mcore
+@pytest.mark.parametrize("cp_size", [2, 8])
+def test_unpacked_cp_preserves_rows_and_shards_positions(cp_size):
+    from nemo_rl.models.megatron.data import process_microbatch
+
+    tokens = torch.arange(62).reshape(2, 31)
+    for rank in range(cp_size):
+        data = BatchedDataDict({"input_ids": tokens.clone()})
+        with (
+            patch(
+                "nemo_rl.models.megatron.data.get_context_parallel_world_size",
+                return_value=cp_size,
+            ),
+            patch(
+                "nemo_rl.models.megatron.data.get_context_parallel_rank",
+                return_value=rank,
+            ),
+            patch(
+                "nemo_rl.models.megatron.data.get_ltor_masks_and_position_ids"
+            ) as square_mask,
+        ):
+            result = process_microbatch(
+                data, pack_sequences=False, pad_individual_seqs_to_multiple_of=32
+            )
+        segment = 32 // (2 * cp_size)
+        indices = torch.cat(
+            (
+                torch.arange(rank * segment, (rank + 1) * segment),
+                torch.arange(
+                    (2 * cp_size - rank - 1) * segment, (2 * cp_size - rank) * segment
+                ),
+            )
+        )
+        expected = torch.nn.functional.pad(tokens, (0, 1))
+        torch.testing.assert_close(result.input_ids, expected)
+        torch.testing.assert_close(result.input_ids_cp_sharded, expected[:, indices])
+        torch.testing.assert_close(result.position_ids, indices.expand(2, -1))
+        assert result.attention_mask is None
+        assert result.packed_seq_params is None
+        square_mask.assert_not_called()

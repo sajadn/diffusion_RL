@@ -5729,3 +5729,28 @@ class TestPeftWarmStart:
         mock_hook.assert_called_once()
         # The hook receives the resolved donor iteration directory.
         assert mock_hook.call_args.args[2] == str(donor_iter_dir)
+
+
+@pytest.mark.mcore
+@pytest.mark.parametrize("allow", [None, False, True])
+def test_unpacked_cp_requires_explicit_opt_in(allow):
+    from nemo_rl.models.megatron.setup import _apply_parallelism_config
+
+    parallel = dict(
+        tensor_model_parallel_size=2,
+        pipeline_model_parallel_size=1,
+        num_layers_in_first_pipeline_stage=None,
+        num_layers_in_last_pipeline_stage=None,
+        sequence_parallel=True,
+        context_parallel_size=8,
+    )
+    if allow is not None:
+        parallel["allow_unpacked_context_parallel"] = allow
+    config = {"megatron_cfg": parallel, "sequence_packing": {"enabled": False}}
+    model = SimpleNamespace()
+    if allow:
+        _apply_parallelism_config(model, config)
+        assert model.context_parallel_size == 8
+    else:
+        with pytest.raises(AssertionError, match="allow_unpacked_context_parallel"):
+            _apply_parallelism_config(model, config)

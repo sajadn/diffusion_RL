@@ -396,6 +396,9 @@ class MegatronConfig(TypedDict):
     num_layers_in_first_pipeline_stage: int | None
     num_layers_in_last_pipeline_stage: int | None
     context_parallel_size: int
+    # Opt into unpacked CP for models with dense CP-capable attention. If omitted,
+    # CP requires sequence packing; true allows dense batches with MBS > 1.
+    allow_unpacked_context_parallel: NotRequired[bool]
     # Nemotron Omni RADIO/provider booleans. Omit any field to retain the model
     # provider's checkpoint/default value.
     radio_force_cpe_eval_mode: NotRequired[bool]

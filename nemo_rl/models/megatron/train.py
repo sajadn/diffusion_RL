@@ -837,6 +837,7 @@ class LogprobsPostProcessor:
                     vocab_start_index=tp_rank * output_tensor.shape[-1],
                     vocab_end_index=(tp_rank + 1) * output_tensor.shape[-1],
                     tp_group=tp_grp,
+                    cp_group=get_context_parallel_group(),
                     inference_only=True,
                     chunk_size=logprob_chunk_size,
                     sampling_params=self.sampling_params,

@@ -965,7 +965,29 @@ def process_microbatch(
                         input_ids,
                         data_dict["input_lengths"],
                     )
+            cp_size = get_context_parallel_world_size()
+            cp_rank = get_context_parallel_rank()
             input_ids_cp_sharded = input_ids
+            if cp_size > 1:
+                if model_slices_context_parallel_inputs:
+                    raise NotImplementedError(
+                        "Unpacked CP does not support model-owned input slicing."
+                    )
+                if input_ids.shape[1] % (2 * cp_size):
+                    raise ValueError(
+                        "Unpacked sequence length must be divisible by 2 * CP size."
+                    )
+                input_ids_cp_sharded = _get_tokens_on_this_cp_rank(
+                    input_ids, cp_rank, cp_size, seq_dim=1
+                )
+                if routed_experts_cp_sharded is not None:
+                    routed_experts_cp_sharded = _get_tokens_on_this_cp_rank(
+                        routed_experts_cp_sharded, cp_rank, cp_size, seq_dim=1
+                    )
+                if token_identity_cp_sharded is not None:
+                    token_identity_cp_sharded = _get_tokens_on_this_cp_rank(
+                        token_identity_cp_sharded, cp_rank, cp_size, seq_dim=1
+                    )
             verified_token_count = _verify_r3_trace_cp_token_alignment(
                 source_input_ids=data_dict["input_ids"],
                 source_routed_experts=data_dict.get("routed_experts"),
@@ -981,23 +1003,43 @@ def process_microbatch(
                 cp_rank=get_context_parallel_rank(),
                 cp_size=get_context_parallel_world_size(),
             )
-            attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
-                data=input_ids,
-                eod_token=0,  # used for loss_mask, which we don't use
-                pad_token=0,  # used for loss_mask, which we don't use
-                reset_position_ids=False,
-                reset_attention_mask=False,
-                eod_mask_loss=False,
-                pad_mask_loss=False,
-            )
+            if cp_size > 1:
+                # CP-capable causal attention builds its mask inside the kernel.
+                # Materializing a full S x S mask would waste memory at 128K.
+                position_ids = _get_tokens_on_this_cp_rank(
+                    torch.arange(input_ids.shape[1], device=input_ids.device)
+                    .unsqueeze(0)
+                    .expand_as(input_ids),
+                    cp_rank,
+                    cp_size,
+                    seq_dim=1,
+                )
+            else:
+                attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
+                    data=input_ids,
+                    eod_token=0,  # used for loss_mask, which we don't use
+                    pad_token=0,  # used for loss_mask, which we don't use
+                    reset_position_ids=False,
+                    reset_attention_mask=False,
+                    eod_mask_loss=False,
+                    pad_mask_loss=False,
+                )
             if "mtp_loss_mask" in data_dict:
                 mtp_loss_mask = data_dict["mtp_loss_mask"]
-            # Unpacked: rows still are samples, so the mask is already in the
-            # layout the model will see.
+            # Dense CP preserves sample rows and shards only the sequence axis.
             if "media_token_validity_mask" in data_dict:
                 media_token_validity_mask = data_dict[
                     "media_token_validity_mask"
                 ].bool()
+            if cp_size > 1:
+                if mtp_loss_mask is not None:
+                    mtp_loss_mask = _get_tokens_on_this_cp_rank(
+                        mtp_loss_mask, cp_rank, cp_size, seq_dim=1
+                    )
+                if media_token_validity_mask is not None:
+                    media_token_validity_mask = _get_tokens_on_this_cp_rank(
+                        media_token_validity_mask, cp_rank, cp_size, seq_dim=1
+                    )
     return ProcessedInputs(
         input_ids=input_ids,
         input_ids_cp_sharded=input_ids_cp_sharded,
