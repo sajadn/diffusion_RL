@@ -1,3 +1,22 @@
+# Baseline-matched LLaDA validation (2026-10-21)
+
+- MATH-12K and the new GSM8K recipe use the primary JustGRPO `fixed1_t1`
+  validation decoder: 32-token blocks, one highest-confidence sampled token per
+  step, temperature 1.0, and 256 response tokens. Training retains Fork decoding
+  and the 64-view replay cap. Additional baseline threshold sweeps are disabled.
+- ForkGRPO and LLaDA regression suites: **88 passed, 1 deselected** (the existing
+  stale JustGRPO recipe inventory assertion). New tests compare both recipes
+  directly with the baseline decoder and reject non-Fork training or malformed
+  validation blocks. Ruff and shell syntax checks passed.
+- The preceding MATH job `20648526` passed two GPU training updates and Fork
+  validation before its full run began. The smoke logged fallback means of
+  72.28 and 63.40, maxima 202 and 226, and 64 replay views in both updates.
+  This establishes GPU Fork replay execution, not the new validation results.
+- Job `20648526` was cancelled at the user's request during initial production
+  validation, before any production checkpoint. Replacement MATH and new GSM8K
+  launches use fresh directories and begin with two updates plus baseline-decoder
+  validation before their full runs.
+
 # LLaDA Fork verification (2026-10-21)
 
 - ForkGRPO, TraceGRPO, and LLaDA full-canvas/generation suites: **151 passed,

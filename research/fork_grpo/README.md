@@ -76,6 +76,16 @@ Use `configs/recipes/fork_grpo-math12k-llada8b-canvas256-4n8g-megatron-long.yaml
 with `MATH12K_DATA_DIR` set as above. This recipe uses LLaDA-8B, four nodes,
 256 response tokens, temperature 1.0, confidence threshold 0.9, and training and
 scoring microbatch size 2. Generation shares the Megatron training workers.
+Validation matches the primary LLaDA JustGRPO `fixed1_t1` decoder: 32-token blocks,
+one highest-confidence sampled token per step, temperature 1.0, and a 256-token
+response canvas. Fork is used for training rollouts only.
+
+For GSM8K, use
+`configs/recipes/fork_grpo-gsm8k-llada8b-canvas256-4n8g-megatron-long.yaml`.
+It uses the same training settings, the GSM8K train/test splits, a 768-token
+prompt limit, and the same baseline validation decoder on all 1,319 test examples.
+Only the primary baseline decoder is evaluated; additional baseline threshold
+sweeps are not enabled.
 Add `research/just_grpo` to `PYTHONPATH` for the shared LLaDA implementation.
 
 LLaDA attends bidirectionally across the full canvas. Fork records globally

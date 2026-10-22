@@ -47,7 +47,25 @@ class ForkGRPOConfig(DiffusionExperimentConfig):
         )
         if self.sampling.temperature <= 0:
             raise ValueError("Training temperature must be positive")
-        for sampling in (self.sampling, self.validation_sampling):
+        for is_validation, sampling in (
+            (False, self.sampling),
+            (True, self.validation_sampling),
+        ):
+            if (
+                self.runtime == "megatron_llada"
+                and is_validation
+                and sampling.selection_policy == "low_confidence"
+            ):
+                if (
+                    self.schedule.block_size % sampling.block_size
+                    or sampling.max_steps != sampling.block_size
+                    or sampling.returns_entropy
+                ):
+                    raise ValueError(
+                        "LLaDA baseline validation needs complete blocks, one token "
+                        "per step, and no entropy metadata"
+                    )
+                continue
             if sampling.selection_policy != selection_policy:
                 raise ValueError(f"ForkGRPO requires {selection_policy} sampling")
             if sampling.block_size != self.schedule.block_size:

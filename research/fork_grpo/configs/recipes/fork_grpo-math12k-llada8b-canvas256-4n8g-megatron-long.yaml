@@ -26,7 +26,16 @@ fork_grpo:
     returns_reveal_steps: true
     returns_entropy: false
     emit_full_blocks: true
-  validation_sampling: ${fork_grpo.sampling}
+  # Match the primary LLaDA JustGRPO validation decoder (fixed1_t1).
+  validation_sampling:
+    temperature: ${policy.generation.val_temperature}
+    block_size: 32
+    max_steps: 32
+    selection_policy: low_confidence
+    threshold: 0.9
+    returns_reveal_steps: false
+    returns_entropy: false
+    emit_full_blocks: false
 
 grpo:
   seq_logprob_error_threshold: null

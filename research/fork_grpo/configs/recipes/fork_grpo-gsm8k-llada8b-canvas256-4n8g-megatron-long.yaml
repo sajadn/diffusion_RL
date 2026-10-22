@@ -1,0 +1,34 @@
+# LLaDA-8B Fork on GSM8K: 64 replay views, baseline-matched validation.
+# Training uses Fork; validation uses the primary JustGRPO fixed1_t1 decoder.
+defaults: fork_grpo-math12k-llada8b-canvas256-4n8g-megatron-long.yaml
+
+grpo:
+  # Eleven batches include all 1,319 test examples and the final short batch.
+  max_val_samples: 1408
+  val_batch_size: 128
+
+policy:
+  max_total_sequence_length: 1024
+
+data:
+  _override_: true
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  max_input_seq_length: 768
+  train:
+    dataset_name: gsm8k
+    split: train
+  validation:
+    dataset_name: gsm8k
+    split: test
+  default:
+    prompt_file: research/just_grpo/configs/prompts/passthrough.txt
+    system_prompt_file: null
+    processor: math_hf_data_processor
+    env_name: math
+
+logger:
+  log_dir: ${oc.env:LOG_DIR,logs/fork_llada_gsm8k_cap64}
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,fork_llada_gsm8k_cap64}

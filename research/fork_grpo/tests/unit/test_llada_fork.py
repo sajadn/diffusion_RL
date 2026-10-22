@@ -22,6 +22,7 @@ from block_diffusion.full_canvas import FullCanvasLayout
 from fork_grpo.algorithm import ForkGRPO, ForkGRPOConfig
 from fork_grpo.config import validate_config
 from just_grpo.generation.llada import generate_llada
+from omegaconf import OmegaConf
 from trace_grpo.algorithm import TraceGRPOSchedule
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
@@ -282,3 +283,65 @@ def test_llada_recipe_and_driver(monkeypatch: pytest.MonkeyPatch) -> None:
         captured[0]["prepare_training_data_factory"]([]).__self__.config.runtime
         == "megatron_llada"
     )
+
+
+@pytest.mark.parametrize("dataset", ["math12k", "gsm8k"])
+def test_llada_fork_validation_matches_primary_baseline(
+    monkeypatch: pytest.MonkeyPatch, dataset: str
+) -> None:
+    monkeypatch.setenv("MATH12K_DATA_DIR", "/data")
+    register_omegaconf_resolvers()
+    root = Path(__file__).parents[4]
+    raw = load_config(
+        root
+        / "research/fork_grpo/configs/recipes"
+        / f"fork_grpo-{dataset}-llada8b-canvas256-4n8g-megatron-long.yaml"
+    )
+    baseline = load_config(
+        root
+        / "research/just_grpo/configs/recipes"
+        / "just_grpo-gsm8k-llada8b-canvas256-16n8g-megatron-inference-long.yaml"
+    )
+    cfg = validate_config(raw)
+    expected = baseline.just_grpo.validation_modes.fixed1_t1
+    for key in (
+        "temperature",
+        "block_size",
+        "max_steps",
+        "selection_policy",
+        "threshold",
+        "returns_reveal_steps",
+        "returns_entropy",
+    ):
+        assert getattr(cfg.validation_sampling, key) == expected[key]
+    assert cfg.sampling.selection_policy == "fork"
+    assert cfg.schedule.num_level_samples == 64
+    assert raw.policy.generation.max_new_tokens == 256
+    if dataset == "gsm8k":
+        assert raw.data.train.dataset_name == "gsm8k"
+        assert raw.data.validation.split == "test"
+        assert raw.data.max_input_seq_length == baseline.data.max_input_seq_length
+        assert raw.grpo.max_val_samples == baseline.grpo.max_val_samples
+        assert raw.data.default.prompt_file == baseline.data.default.prompt_file
+
+    invalid = OmegaConf.to_container(raw.fork_grpo, resolve=True)
+    invalid["sampling"]["selection_policy"] = "low_confidence"
+    with pytest.raises(ValueError, match="requires fork sampling"):
+        ForkGRPOConfig.model_validate(invalid)
+
+
+@pytest.mark.parametrize(
+    "override", [{"block_size": 30}, {"max_steps": 16}, {"returns_entropy": True}]
+)
+def test_llada_baseline_validation_rejects_invalid_geometry(override: dict) -> None:
+    raw = config(256, 64).model_dump()
+    raw["validation_sampling"].update(
+        selection_policy="low_confidence",
+        block_size=32,
+        max_steps=32,
+        returns_reveal_steps=False,
+        emit_full_blocks=False,
+    )
+    raw["validation_sampling"].update(override)
+    with pytest.raises(ValueError, match="LLaDA baseline validation"):
+        ForkGRPOConfig.model_validate(raw)
