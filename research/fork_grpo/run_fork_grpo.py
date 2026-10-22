@@ -36,6 +36,19 @@ def run(config: DictConfig) -> None:
     def prepare_training_data_factory(stop_token_ids: list[int]) -> PrepareTrainingData:
         return ForkGRPO(diffusion, stop_token_ids=stop_token_ids).prepare_training_data
 
+    if diffusion.runtime == "megatron_llada":
+        # LLaDA uses the live Megatron model and a bidirectional full canvas.
+        from just_grpo.generation.llada_generation import validate_llada
+        from just_grpo.generation.llada_megatron import LLaDAMegatronGeneration
+
+        training.run(
+            config,
+            diffusion=diffusion,
+            generation_factory=LLaDAMegatronGeneration,
+            validation_fn=validate_llada,
+            prepare_training_data_factory=prepare_training_data_factory,
+        )
+        return
     training.run(
         config,
         diffusion=diffusion,

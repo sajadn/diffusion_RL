@@ -33,7 +33,7 @@ response still has total sampled loss weight one. Scoring uses unweighted
 logprobs for the same selected tokens.
 
 Responses without fallback tokens contribute zero policy loss and remain in the
-reward group. The policy loss is averaged over nonempty responses. All shards
+reward group. The policy loss is averaged over nonempty responses. For block diffusion, all shards
 execute the configured number of views, including zero-loss views. A globally
 empty batch skips optimizer and scheduler updates, including Adam momentum and
 weight decay.
@@ -69,6 +69,33 @@ prompt limit, 6,144-token context, and the same 3,744-token generation budget.
 It validates all 500 problems once each at temperature 0.6, at the start, every
 10 updates, and at the end. Checkpoints are saved every 10 updates, with a
 3-hour-30-minute save deadline for the four-hour allocation.
+
+## LLaDA full-canvas replay
+
+Use `configs/recipes/fork_grpo-math12k-llada8b-canvas256-4n8g-megatron-long.yaml`
+with `MATH12K_DATA_DIR` set as above. This recipe uses LLaDA-8B, four nodes,
+256 response tokens, temperature 1.0, confidence threshold 0.9, and training and
+scoring microbatch size 2. Generation shares the Megatron training workers.
+Add `research/just_grpo` to `PYTHONPATH` for the shared LLaDA implementation.
+
+LLaDA attends bidirectionally across the full canvas. Fork records globally
+ordered reveal steps and the leftmost fallback flag. The existing
+`TraceGRPOSchedule` reconstructs each selected decision with `FullCanvasLayout`;
+the shared diffusion loss postprocessor applies the fallback mask.
+
+The recipe caps replay at 64 views **per scoring or training phase**, independently
+of generation. For a response with `F` eligible fallback decisions, sample
+`min(F, 64)` uniformly without replacement and weight each by `1 / min(F, 64)`.
+This estimates the full fallback mean without bias. The whole batch uses
+`min(64, max(1, max(F)))` views, so every DP shard executes the same count; empty
+rows and unused views have zero loss. Scoring and training reuse the selections.
+Generation can still require up to 256 full-canvas forwards.
+
+Relative to uncapped Fork, the cap helps only when a batch needs more than 64
+fallback levels. Relative to 256-view LLaDA JustGRPO, 64 views reduces replay
+views by 75%; this is not a prediction of total runtime savings. The driver logs
+`views`, `fallback_mean`, and `fallback_max` for each prepared batch. Each replay
+view still runs the full canvas. Activation checkpointing adds recomputation.
 
 ## Tests
 

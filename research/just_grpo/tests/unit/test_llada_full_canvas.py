@@ -147,7 +147,7 @@ def test_generation_allocates_full_canvas_and_uses_one_reveal_per_pass(block):
         logits[..., 7] = 8
         return logits
 
-    result, _, _ = generate_llada(
+    generated = generate_llada(
         forward,
         torch.tensor([[11, 12]]),
         completion_length=4,
@@ -155,6 +155,7 @@ def test_generation_allocates_full_canvas_and_uses_one_reveal_per_pass(block):
         mask_token_id=99,
         temperature=0.0,
     )
+    result = generated.token_ids
     assert result.tolist() == [[11, 12, 7, 7, 7, 7]]
     assert len(seen) == 4
     assert all(t.shape[1] == 6 for t in seen)
@@ -171,7 +172,7 @@ def test_leftmost_generation_advances_even_if_mask_is_sampled():
         logits[..., 7] = 4
         return logits
 
-    result, _, _ = generate_llada(
+    generated = generate_llada(
         forward,
         torch.tensor([[11]]),
         completion_length=4,
@@ -179,6 +180,7 @@ def test_leftmost_generation_advances_even_if_mask_is_sampled():
         mask_token_id=99,
         temperature=0.0,
     )
+    result = generated.token_ids
     assert result.tolist() == [[11, 99, 7, 7, 7]]
     assert len(seen) == 4
 

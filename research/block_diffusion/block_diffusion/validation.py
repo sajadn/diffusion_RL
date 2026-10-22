@@ -245,7 +245,9 @@ def validate_experiment(
                 "Code requires LLaDA, the reference processor, and explicit validation"
             )
     else:
-        raise ValueError("Supported environments are sudoku6x6, math, and justgrpo_code")
+        raise ValueError(
+            "Supported environments are sudoku6x6, math, and justgrpo_code"
+        )
     if g.max_num_epochs <= 0:
         raise ValueError("max_num_epochs must be positive")
     world_size = world
@@ -278,9 +280,10 @@ def validate_experiment(
             raise ValueError(
                 "LLaDA shared workers require synchronous colocated generation"
             )
-        if p.worker_extension_cls_fqn != (
-            "just_grpo.algorithms.llada_policy_worker.LLaDAJustGRPOPolicyWorker"
-        ):
+        if p.worker_extension_cls_fqn not in {
+            "just_grpo.algorithms.llada_policy_worker.LLaDAJustGRPOPolicyWorker",
+            "fork_grpo.llada_policy_worker.LLaDAForkGRPOPolicyWorker",
+        }:
             raise ValueError("LLaDA requires the full-canvas policy worker")
         if (
             p.generation.stop_token_ids

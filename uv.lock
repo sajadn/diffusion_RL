@@ -2047,6 +2047,7 @@ version = "0.1.0"
 source = { editable = "research/fork_grpo" }
 dependencies = [
     { name = "block-diffusion" },
+    { name = "just-grpo" },
     { name = "nemo-rl" },
     { name = "trace-grpo" },
 ]
@@ -2059,6 +2060,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "block-diffusion", editable = "research/block_diffusion" },
+    { name = "just-grpo", editable = "research/just_grpo" },
     { name = "nemo-rl", editable = "." },
     { name = "trace-grpo", editable = "research/trace_grpo" },
 ]

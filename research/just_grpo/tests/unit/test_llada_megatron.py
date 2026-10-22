@@ -28,7 +28,7 @@ def test_rollout_logprobs_match_full_canvas_replay(temperature):
         hidden = embedding(ids)
         return projection(hidden + hidden.mean(dim=1, keepdim=True)).bfloat16()
 
-    tokens, rollout_probs, _ = generate_llada(
+    generated = generate_llada(
         forward,
         torch.tensor([[1, 2], [3, 4]]),
         completion_length=4,
@@ -37,6 +37,8 @@ def test_rollout_logprobs_match_full_canvas_replay(temperature):
         temperature=temperature,
         generator=torch.Generator().manual_seed(19),
     )
+    tokens = generated.token_ids
+    rollout_probs = generated.logprobs
     mask = torch.zeros_like(tokens)
     mask[:, 2:] = 1
     data = BatchedDataDict(
@@ -211,7 +213,7 @@ def test_threshold_reveals_parallel_tokens_and_preserves_future_canvas(
         logits[..., 7] = 10
         return logits
 
-    tokens, _, counts = generate_llada(
+    generated = generate_llada(
         forward,
         torch.tensor([[1, 2]]),
         completion_length=4,
@@ -220,6 +222,8 @@ def test_threshold_reveals_parallel_tokens_and_preserves_future_canvas(
         temperature=0,
         threshold=threshold,
     )
+    tokens = generated.token_ids
+    counts = generated.num_forward_passes
     assert len(seen) == expected
     assert counts.tolist() == [expected]
     assert tokens.tolist() == [[1, 2, 7, 7, 7, 7]]
@@ -235,7 +239,7 @@ def test_threshold_fallback_and_finished_rows():
         logits[1, :, 7] = 0.1
         return logits
 
-    tokens, _, counts = generate_llada(
+    generated = generate_llada(
         forward,
         torch.tensor([[1], [2]]),
         completion_length=4,
@@ -244,6 +248,8 @@ def test_threshold_fallback_and_finished_rows():
         temperature=0,
         threshold=0.9,
     )
+    tokens = generated.token_ids
+    counts = generated.num_forward_passes
     assert counts.tolist() == [1, 4]
     assert (tokens[:, 1:] == 7).all()
 
@@ -336,7 +342,7 @@ def test_fixed_two_reveals_ranked_positions_in_full_canvas():
         logits[..., 7] = torch.arange(ids.shape[1]).float() + 1
         return logits
 
-    tokens, _, counts = generate_llada(
+    generated = generate_llada(
         forward,
         torch.tensor([[1, 2]]),
         completion_length=8,
@@ -345,6 +351,8 @@ def test_fixed_two_reveals_ranked_positions_in_full_canvas():
         temperature=0,
         tokens_per_step=2,
     )
+    tokens = generated.token_ids
+    counts = generated.num_forward_passes
     assert counts.tolist() == [4]
     assert len(seen) == 4
     assert seen[1].tolist() == [[1, 2, 15, 15, 7, 7, 15, 15, 15, 15]]

@@ -19,6 +19,7 @@ import torch
 from block_diffusion.block_layout import BlockDiffusionLayout
 from block_diffusion.config import BlockDiffusionConfig, DiffusionExperimentConfig
 from block_diffusion.denoising_schedule import DenoisingSchedule
+from block_diffusion.full_canvas import FullCanvasLayout
 from block_diffusion.replay import recorded_reveal_states
 from pydantic import Field, model_validator
 
@@ -140,6 +141,7 @@ class TraceGRPOSchedule(DenoisingSchedule):
         pad_token_id: int,
         padded_width: int | None = None,
         weighted_loss: bool,
+        layout: BlockDiffusionLayout | FullCanvasLayout | None = None,
     ) -> None:
         for key in (
             "trace_reveal_levels",
@@ -151,11 +153,15 @@ class TraceGRPOSchedule(DenoisingSchedule):
                 raise ValueError(
                     "Trace batches must be prepared before policy/reference/training dispatch"
                 )
-        self.layout = BlockDiffusionLayout(
-            data,
-            block_size=config.block_size,
-            pad_token_id=pad_token_id,
-            padded_width=padded_width,
+        self.layout = (
+            layout
+            if layout is not None
+            else BlockDiffusionLayout(
+                data,
+                block_size=config.block_size,
+                pad_token_id=pad_token_id,
+                padded_width=padded_width,
+            )
         )
         positions = self.layout.base["original_positions"]
         self.levels = data["trace_reveal_levels"].gather(1, positions)

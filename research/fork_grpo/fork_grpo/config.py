@@ -27,9 +27,10 @@ def validate_config(config: DictConfig) -> ForkGRPOConfig:
         raise ValueError("Fallback-only scores cannot apply whole-response filtering")
     if (config.get("data_plane") or {}).get("enabled"):
         raise ValueError("ForkGRPO requires driver rollout batch preparation")
-    if (
-        config.policy.worker_extension_cls_fqn
-        != "fork_grpo.policy_worker.ForkGRPOPolicyWorker"
+    if config.policy.worker_extension_cls_fqn != (
+        "fork_grpo.llada_policy_worker.LLaDAForkGRPOPolicyWorker"
+        if diffusion.runtime == "megatron_llada"
+        else "fork_grpo.policy_worker.ForkGRPOPolicyWorker"
     ):
         raise ValueError("ForkGRPO requires ForkGRPOPolicyWorker")
     if config.policy.get("diffusion_aux_loss") is not None:

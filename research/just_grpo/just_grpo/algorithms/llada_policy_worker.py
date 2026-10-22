@@ -17,6 +17,7 @@ from typing import Any
 
 import ray
 import torch
+from block_diffusion.config import DiffusionExperimentConfig, DiffusionSamplingParams
 from block_diffusion.denoising_schedule import SchedulePurpose
 from block_diffusion.full_canvas import FullCanvasLayout, FullCanvasMicrobatchProcessor
 from block_diffusion.megatron_diffusion_policy import MegatronDiffusionPolicyWorkerImpl
@@ -37,21 +38,27 @@ class LLaDAJustGRPOPolicyWorkerImpl(MegatronDiffusionPolicyWorkerImpl):
 
     def __init__(self, config: Any, tokenizer: Any, **kwargs: Any) -> None:
         research = OmegaConf.create(config.pop("diffusion_config"))
-        self.just_grpo = JustGRPOConfig.model_validate(
-            OmegaConf.to_container(research.just_grpo, resolve=True)
-        )
+        self.diffusion = self._load_diffusion_config(research)
         self.validation_mode = False
         self.validation_mode_name: str | None = None
         super().__init__(
             config,
             tokenizer,
-            mask_token_id=self.just_grpo.schedule.mask_token_id,
-            block_size=self.just_grpo.schedule.block_size,
-            sampling=self.just_grpo.sampling,
+            mask_token_id=self.diffusion.schedule.mask_token_id,
+            block_size=self.diffusion.schedule.block_size,
+            sampling=self.diffusion.sampling,
             generation_seed=research.grpo.seed,
-            max_generation_kl=self.just_grpo.max_generation_kl,
+            max_generation_kl=self.diffusion.max_generation_kl,
             **kwargs,
         )
+
+    def _load_diffusion_config(self, research: Any) -> DiffusionExperimentConfig:
+        return JustGRPOConfig.model_validate(
+            OmegaConf.to_container(research.just_grpo, resolve=True)
+        )
+
+    def _generation_block_length(self, sampling: DiffusionSamplingParams) -> int:
+        return sampling.block_size if self.validation_mode else 1
 
     def _configure_model(self, hf_config: Any, config: Any, block_size: int) -> None:
         # Register this optional architecture before native Bridge model construction.
@@ -74,7 +81,7 @@ class LLaDAJustGRPOPolicyWorkerImpl(MegatronDiffusionPolicyWorkerImpl):
         self, data: BatchedDataDict[Any], *, purpose: SchedulePurpose
     ) -> LLaDAJustGRPOSchedule:
         return LLaDAJustGRPOSchedule(
-            data, canvas_length=self.just_grpo.schedule.block_size
+            data, canvas_length=self.diffusion.schedule.block_size
         )
 
     def _build_positive_diffusion_level(
@@ -88,13 +95,13 @@ class LLaDAJustGRPOPolicyWorkerImpl(MegatronDiffusionPolicyWorkerImpl):
             stop_token_ids=self.cfg["generation"]["stop_token_ids"],
             generator=self.positive_diffusion_generator,
             layout=FullCanvasLayout(
-                data, canvas_length=self.just_grpo.schedule.block_size
+                data, canvas_length=self.diffusion.schedule.block_size
             ),
         )
 
     def set_validation_sampling(self, enabled: bool, mode: str | None = None) -> None:
         """Select the confidence decoder between synchronous generation batches."""
-        if mode is not None and mode not in self.just_grpo.validation_modes:
+        if mode is not None and mode not in self.diffusion.validation_modes:
             raise ValueError(f"Unknown validation mode: {mode}")
         self.validation_mode = enabled
         self.validation_mode_name = mode if enabled else None
@@ -110,14 +117,14 @@ class LLaDAJustGRPOPolicyWorkerImpl(MegatronDiffusionPolicyWorkerImpl):
             raise ValueError("Shared LLaDA generation currently requires TP=1")
         sampling = (
             (
-                self.just_grpo.validation_modes[self.validation_mode_name]
+                self.diffusion.validation_modes[self.validation_mode_name]
                 if self.validation_mode_name is not None
-                else self.just_grpo.validation_sampling
+                else self.diffusion.validation_sampling
             )
             if self.validation_mode
-            else self.just_grpo.sampling
+            else self.diffusion.sampling
         )
-        block = sampling.block_size if self.validation_mode else 1
+        block = self._generation_block_length(sampling)
         device = torch.device("cuda", torch.cuda.current_device())
         lengths = data["input_lengths"].to(device)
         inputs = data["input_ids"].to(device)
@@ -133,6 +140,8 @@ class LLaDAJustGRPOPolicyWorkerImpl(MegatronDiffusionPolicyWorkerImpl):
         )
         logprobs = torch.zeros(output.shape, dtype=torch.float32, device=device)
         forward_counts = torch.zeros(len(lengths), dtype=torch.long, device=device)
+        reveal_steps = torch.full_like(output, -1)
+        fallback_mask = torch.zeros_like(output, dtype=torch.bool)
         rng = torch.Generator(device=device).manual_seed(
             self.generation_seed
             + parallel_state.get_data_parallel_rank()
@@ -157,8 +166,8 @@ class LLaDAJustGRPOPolicyWorkerImpl(MegatronDiffusionPolicyWorkerImpl):
         try:
             for length in lengths.unique().tolist():
                 indices = torch.nonzero(lengths == length).flatten()
-                for chunk in indices.split(self.just_grpo.generation_batch_size):
-                    tokens, probs, counts = generate_llada(
+                for chunk in indices.split(self.diffusion.generation_batch_size):
+                    sampled = generate_llada(
                         forward,
                         inputs[chunk, :length],
                         completion_length=completion,
@@ -169,17 +178,22 @@ class LLaDAJustGRPOPolicyWorkerImpl(MegatronDiffusionPolicyWorkerImpl):
                         tokens_per_step=sampling.block_size // sampling.max_steps,
                         threshold=(
                             sampling.threshold
-                            if sampling.selection_policy == "confidence_threshold"
+                            if sampling.selection_policy
+                            in ("confidence_threshold", "fork")
                             else None
                         ),
+                        leftmost_fallback=sampling.selection_policy == "fork",
                     )
-                    forward_counts[chunk] = counts
-                    output[chunk, : tokens.shape[1]] = tokens
-                    logprobs[chunk, : tokens.shape[1]] = probs
+                    width = sampled.token_ids.shape[1]
+                    forward_counts[chunk] = sampled.num_forward_passes
+                    output[chunk, :width] = sampled.token_ids
+                    logprobs[chunk, :width] = sampled.logprobs
+                    reveal_steps[chunk, :width] = sampled.reveal_steps
+                    fallback_mask[chunk, :width] = sampled.fallback_mask
         finally:
             self.prepare_microbatch_fn.clear_asymmetric_metadata()
         self.generation_index += 1
-        return BatchedDataDict(
+        result = BatchedDataDict(
             output_ids=output.cpu(),
             num_forward_passes=forward_counts.cpu(),
             logprobs=logprobs.cpu(),
@@ -187,6 +201,10 @@ class LLaDAJustGRPOPolicyWorkerImpl(MegatronDiffusionPolicyWorkerImpl):
             unpadded_sequence_lengths=(lengths + completion).cpu(),
             truncated=torch.zeros(len(lengths), dtype=torch.bool),
         )
+        if sampling.returns_reveal_steps:
+            result["reveal_steps"] = reveal_steps.cpu()
+            result["fallback_mask"] = fallback_mask.cpu()
+        return result
 
 
 @ray.remote(runtime_env=get_runtime_env_for_policy_worker("megatron_policy_worker"))

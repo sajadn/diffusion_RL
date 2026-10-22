@@ -1,0 +1,76 @@
+# Original LLaDA-8B Fork: MATH-12K train / MATH-500 validation.
+# Full bidirectional replay, capped at 64 sampled fallback decisions per response.
+# Generation can still use up to 256 calls. All workers share generation/training.
+defaults: ../../../just_grpo/configs/recipes/just_grpo-gsm8k-llada8b-canvas256-16n8g-megatron-inference-long.yaml
+
+just_grpo:
+  _override_: true
+
+fork_grpo:
+  distributed: true
+  runtime: megatron_llada
+  generation_python: null
+  generation_batch_size: 2
+  max_generation_kl: 0.1
+  schedule:
+    mask_token_id: 126336
+    block_size: 256
+    num_level_samples: 64
+    seed_base: 42
+  sampling:
+    temperature: ${policy.generation.temperature}
+    block_size: ${fork_grpo.schedule.block_size}
+    max_steps: ${fork_grpo.schedule.block_size}
+    selection_policy: fork
+    threshold: 0.9
+    returns_reveal_steps: true
+    returns_entropy: false
+    emit_full_blocks: true
+  validation_sampling: ${fork_grpo.sampling}
+
+grpo:
+  seq_logprob_error_threshold: null
+  max_val_samples: 500
+  val_batch_size: 100
+
+policy:
+  worker_extension_cls_fqn: fork_grpo.llada_policy_worker.LLaDAForkGRPOPolicyWorker
+  train_micro_batch_size: 2
+  logprob_batch_size: 2
+  max_total_sequence_length: 2304
+  generation:
+    max_new_tokens: ${fork_grpo.schedule.block_size}
+
+data:
+  _override_: true
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  max_input_seq_length: 2048
+  train:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:MATH12K_DATA_DIR}/train.jsonl
+    input_key: problem
+    output_key: answer
+  validation:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:MATH12K_DATA_DIR}/test.jsonl
+    input_key: problem
+    output_key: answer
+  default:
+    prompt_file: research/just_grpo/configs/prompts/passthrough.txt
+    system_prompt_file: null
+    processor: math_hf_data_processor
+    env_name: math
+
+checkpointing:
+  save_period: 10
+  ft_save_period: 10
+
+logger:
+  log_dir: ${oc.env:LOG_DIR,logs/fork_llada_math12k_cap64}
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,fork_llada_math12k_cap64}
+
+cluster:
+  num_nodes: 4

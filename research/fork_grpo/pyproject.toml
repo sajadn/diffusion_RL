@@ -8,13 +8,14 @@ version = "0.1.0"
 description = "ForkGRPO fallback-only diffusion training on NeMo RL"
 readme = "README.md"
 requires-python = ">=3.13.14,<3.14"
-dependencies = ["block-diffusion", "nemo-rl", "trace-grpo"]
+dependencies = ["block-diffusion", "just-grpo", "nemo-rl", "trace-grpo"]
 
 [dependency-groups]
 test = ["pytest>=7.0.0"]
 
 [tool.uv.sources]
 block-diffusion = { workspace = true }
+just-grpo = { workspace = true }
 nemo-rl = { workspace = true }
 trace-grpo = { workspace = true }
 

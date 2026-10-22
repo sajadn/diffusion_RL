@@ -19,6 +19,7 @@ import torch
 from block_diffusion.block_layout import BlockDiffusionLayout
 from block_diffusion.config import BlockDiffusionConfig, DiffusionExperimentConfig
 from block_diffusion.replay import recorded_reveal_states
+from just_grpo.algorithms.llada_schedule import prepare_llada_training_data
 from pydantic import Field, model_validator
 
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
@@ -33,13 +34,16 @@ class ForkScheduleConfig(BlockDiffusionConfig, extra="forbid"):
 
 class ForkGRPOConfig(DiffusionExperimentConfig):
     schedule: ForkScheduleConfig
+    generation_batch_size: int = Field(default=4, gt=0)
 
     @model_validator(mode="after")
     def validate_fork(self) -> Self:
-        if self.runtime not in {"megatron", "reference_vllm"}:
+        if self.runtime not in {"megatron", "reference_vllm", "megatron_llada"}:
             raise ValueError("ForkGRPO requires Megatron or reference vLLM generation")
         selection_policy = (
-            "fork" if self.runtime == "megatron" else "confidence_threshold_leftmost"
+            "fork"
+            if self.runtime in {"megatron", "megatron_llada"}
+            else "confidence_threshold_leftmost"
         )
         if self.sampling.temperature <= 0:
             raise ValueError("Training temperature must be positive")
@@ -48,6 +52,13 @@ class ForkGRPOConfig(DiffusionExperimentConfig):
                 raise ValueError(f"ForkGRPO requires {selection_policy} sampling")
             if sampling.block_size != self.schedule.block_size:
                 raise ValueError("Fork sampling and training block sizes must match")
+            if (
+                self.runtime == "megatron_llada"
+                and sampling.max_steps != sampling.block_size
+            ):
+                raise ValueError(
+                    "LLaDA Fork needs one possible fallback per canvas token"
+                )
             if sampling.max_steps < sampling.block_size:
                 raise ValueError("Fork decoding requires max_steps >= block_size")
             if not sampling.returns_reveal_steps or not sampling.emit_full_blocks:
@@ -69,6 +80,10 @@ class ForkGRPO:
     def prepare_training_data(
         self, data: BatchedDataDict[Any], message_logs: list[list[dict]], step: int
     ) -> None:
+        if self.config.runtime == "megatron_llada":
+            prepare_llada_training_data(
+                data, message_logs, step, canvas_length=self.config.schedule.block_size
+            )
         levels, loss_mask = recorded_reveal_states(
             data, message_logs, stop_token_ids=self.stop_token_ids
         )
@@ -91,6 +106,42 @@ class ForkGRPO:
             raise ValueError("Fallback tokens must have recorded reveal steps")
         fallback &= loss_mask
         config = self.config.schedule
+        if self.config.runtime == "megatron_llada":
+            fallback &= data["sample_mask"].bool()[:, None]
+            counts = fallback.sum(1)
+            views = min(config.num_level_samples, max(1, int(counts.max())))
+            sampled = torch.full(
+                (data.size, views),
+                self.config.sampling.max_steps,
+                device=levels.device,
+                dtype=torch.long,
+            )
+            weights = torch.zeros(data.size, device=levels.device)
+            for row in range(data.size):
+                values = levels[row, fallback[row]]
+                if values.unique().numel() != values.numel():
+                    raise ValueError(
+                        "Full-canvas Fork needs one fallback per global level"
+                    )
+                count = min(views, values.numel())
+                if not count:
+                    continue
+                seed = config.seed_base + step * 1_000_003 + row
+                generator = torch.Generator().manual_seed(seed & 0x7FFFFFFFFFFFFFFF)
+                selected = torch.randperm(values.numel(), generator=generator)[:count]
+                sampled[row, :count] = values[selected.to(values.device)]
+                weights[row] = 1 / count
+            data["trace_reveal_levels"] = levels
+            data["trace_loss_mask"] = fallback
+            data["trace_sampled_levels"] = sampled
+            data["trace_loss_weights"] = weights
+            print(
+                f"Fork LLaDA replay: views={views}, cap={config.num_level_samples}, "
+                f"fallback_mean={counts.float().mean().item():.2f}, "
+                f"fallback_max={int(counts.max())}",
+                flush=True,
+            )
+            return
         layout = BlockDiffusionLayout(
             data, block_size=config.block_size, pad_token_id=config.mask_token_id
         )

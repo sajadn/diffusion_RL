@@ -1,3 +1,23 @@
+# LLaDA Fork verification (2026-10-21)
+
+- ForkGRPO, TraceGRPO, and LLaDA full-canvas/generation suites: **151 passed,
+  1 deselected**. The deselected `exactly_eight_llada_recipes` test already has
+  a stale inventory count at HEAD; this change does not add a JustGRPO recipe.
+- Tests cover leftmost fallback selection, exact full-canvas replay logprobs,
+  globally ordered multi-block reveals, prompt offsets, scoring/training mask
+  parity, DP slicing, empty rows/shards, deterministic sampling, and unbiased
+  normalization. Fallback counts 0/3/64/130 produce 1/3/64/64 batch views.
+- Sampled MASK tokens commit once, preventing repeated fallback decisions at
+  the same position. Existing JustGRPO decoding remains covered.
+- The new MATH-12K/MATH-500 recipe validates with a 256-token generation canvas
+  and at most 64 views per scoring/training phase. Generation is not capped at 64.
+- Ruff check/format and `git diff --check` passed. Workspace lock metadata
+  includes the new dependency on the existing `just-grpo` package. Offline
+  `uv lock --check` cannot run because Python 3.13.14 is unavailable; the
+  provisioned test interpreter uses Python 3.13.13.
+- GPU execution and actual LLaDA fallback-count measurements remain pending.
+  The launch runs two training updates plus validation before the full run.
+
 # Three-view fallback replay verification (2026-10-21)
 
 - **140 CPU tests passed** across ForkGRPO, TraceGRPO, the shared schedule, and
