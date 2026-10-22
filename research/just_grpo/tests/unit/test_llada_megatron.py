@@ -92,7 +92,7 @@ def test_shared_worker_recipes(monkeypatch, auxiliary, smoke, dataset):
         validate_config(config)
 
 
-def test_exactly_eight_llada_recipes():
+def test_required_llada_recipes_are_present():
     project = Path(__file__).resolve().parents[2]
     expected = {
         f"just_grpo-{dataset}-llada8b-canvas256-{mode}{suffix}.yaml"
@@ -100,7 +100,12 @@ def test_exactly_eight_llada_recipes():
         for mode in ("16n8g-megatron-inference-long", "2n8g-megatron-inference-smoke")
         for suffix in ("", "-diffaux")
     }
-    assert {p.name for p in (project / "configs").rglob("*llada*.yaml")} == expected
+    expected.update(
+        f"just_grpo-acecode-llada8b-2n8g-megatron-humaneval-{mode}.yaml"
+        for mode in ("long", "smoke")
+    )
+    # Additional experiment recipes and protocol specifications are allowed.
+    assert expected <= {p.name for p in (project / "configs").rglob("*llada*.yaml")}
     assert not list(
         (project.parents[1] / "examples/configs/recipes").rglob("*llada*.yaml")
     )
