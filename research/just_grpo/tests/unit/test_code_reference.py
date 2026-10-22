@@ -88,3 +88,32 @@ def test_preparation_preserves_reference_prompts():
 def test_unknown_task_fails_instead_of_zero_score():
     with pytest.raises(RuntimeError, match="Unsupported task"):
         score_chunk([{"kind": "unknown", "completion": ""}], config())
+
+
+@pytest.mark.parametrize("mode", ["long", "smoke"])
+def test_code_recipe_sampling_uses_llada_validation_adapter(monkeypatch, mode):
+    from just_grpo.config import validate_config
+    from nemo_rl.utils.config import load_config, register_omegaconf_resolvers
+
+    monkeypatch.setenv("LLADA_CODE_MAX_PROMPT_TOKENS", "1150")
+    monkeypatch.setenv("LLADA_CODE_SEQUENCE_LENGTH", "1536")
+    monkeypatch.setenv("LLADA_CODE_DATA_DIR", "/data")
+    monkeypatch.setenv("JUSTGRPO_REFERENCE_DIR", "/reference")
+    monkeypatch.setenv("POLICY_PYTHON", "/python")
+    register_omegaconf_resolvers()
+    cfg = load_config(
+        ROOT
+        / "configs/recipes"
+        / f"just_grpo-acecode-llada8b-2n8g-megatron-humaneval-{mode}.yaml"
+    )
+    diffusion = validate_config(cfg)
+    # Native GRPO rejects validation-only temperature overrides for Megatron.
+    assert cfg.policy.generation.val_temperature == cfg.policy.generation.temperature
+    # The LLaDA validation context owns the actual held-out decoding settings.
+    assert diffusion.sampling.temperature == 1.0
+    assert diffusion.validation_sampling.temperature == 0.0
+    assert diffusion.validation_sampling.block_size == 32
+    assert diffusion.validation_sampling.max_steps == 32
+    cfg.policy.generation.val_temperature = 0.0
+    with pytest.raises(ValueError, match="just_grpo.validation_sampling"):
+        validate_config(cfg)

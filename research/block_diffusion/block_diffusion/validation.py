@@ -377,8 +377,18 @@ def validate_experiment(
     for params in (diffusion.sampling, diffusion.validation_sampling):
         if p.generation.max_new_tokens % params.block_size:
             raise ValueError("max_new_tokens must be a multiple of each canvas size")
-    if (
-        diffusion.sampling.temperature != p.generation.temperature
-        or diffusion.validation_sampling.temperature != p.generation.val_temperature
+    if diffusion.sampling.temperature != p.generation.temperature or (
+        diffusion.runtime != "megatron_llada"
+        and diffusion.validation_sampling.temperature != p.generation.val_temperature
     ):
         raise ValueError("Diffusion temperatures must match policy.generation settings")
+    # Native GRPO only supports its val_temperature override on Gym/vLLM.
+    # LLaDA selects its own validation decoder on the shared policy workers.
+    if (
+        diffusion.runtime == "megatron_llada"
+        and p.generation.val_temperature != p.generation.temperature
+    ):
+        raise ValueError(
+            "LLaDA requires native val_temperature to match temperature; "
+            "set evaluation temperature through just_grpo.validation_sampling"
+        )

@@ -48,8 +48,8 @@ policy:
   max_total_sequence_length: ${oc.decode:${oc.env:LLADA_CODE_SEQUENCE_LENGTH}}
   train_micro_batch_size: 1
   logprob_batch_size: 1
-  generation:
-    val_temperature: 0.0
+  # LLaDA switches to greedy decoding through validation_sampling above.
+  # Native Megatron val_temperature must remain equal to training temperature.
 
 data:
   _override_: true
