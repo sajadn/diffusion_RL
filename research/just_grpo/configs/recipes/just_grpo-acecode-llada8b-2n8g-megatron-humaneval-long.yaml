@@ -83,6 +83,8 @@ env:
     python_executable: ${oc.env:POLICY_PYTHON}
     num_workers: 8
     chunk_size: 16
+    # Coalesce per-sample rollout requests before invoking the reference grader.
+    batch_wait_seconds: 0.01
     timeout_seconds: 600
 
 checkpointing:

@@ -13,6 +13,7 @@
 # limitations under the License.
 """AceCode-Hard reward and HumanEval grading through pinned JustGRPO code."""
 
+import asyncio
 import json
 import math
 import os
@@ -20,6 +21,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -45,6 +47,8 @@ class CodeReferenceConfig(BaseModel):
     num_workers: int = Field(gt=0)
     chunk_size: int = Field(gt=0)
     timeout_seconds: float = Field(gt=0)
+    batch_wait_seconds: float = Field(default=0.01, ge=0)
+    """Maximum wait to combine concurrent reward requests into a partial chunk."""
 
 
 def code_data_processor(
@@ -124,8 +128,11 @@ class CodeReferenceEnvironmentImpl(EnvironmentInterface):
         if changes:
             raise ValueError("Reference source has tracked modifications")
         self.pool = ThreadPoolExecutor(max_workers=self.cfg.num_workers)
+        self.pending: list[tuple[dict[str, Any], asyncio.Future[float]]] = []
+        self.flush_handle: asyncio.TimerHandle | None = None
+        self.scoring_tasks: set[asyncio.Task[None]] = set()
 
-    def step(
+    async def step(
         self,
         message_log_batch: list,
         metadata: list[dict[str, Any]],
@@ -135,12 +142,18 @@ class CodeReferenceEnvironmentImpl(EnvironmentInterface):
             {**json.loads(info["ground_truth"]), "completion": messages[-1]["content"]}
             for messages, info in zip(message_log_batch, metadata, strict=True)
         ]
-        chunks = [
-            rows[i : i + self.cfg.chunk_size]
-            for i in range(0, len(rows), self.cfg.chunk_size)
-        ]
-        futures = [self.pool.submit(score_chunk, chunk, self.cfg) for chunk in chunks]
-        scores = [score for future in futures for score in future.result()]
+        if any(row["kind"] not in ("acecode", "humaneval") for row in rows):
+            raise ValueError("Unsupported code reward task kind")
+        loop = asyncio.get_running_loop()
+        futures = [loop.create_future() for _ in rows]
+        self.pending.extend(zip(rows, futures, strict=True))
+        if len(self.pending) >= self.cfg.chunk_size:
+            self._flush()
+        elif self.pending and self.flush_handle is None:
+            self.flush_handle = loop.call_later(
+                self.cfg.batch_wait_seconds, self._flush
+            )
+        scores = await asyncio.gather(*futures)
         return EnvironmentReturn(
             observations=[{"role": "user", "content": ""} for _ in rows],
             metadata=metadata,
@@ -150,12 +163,50 @@ class CodeReferenceEnvironmentImpl(EnvironmentInterface):
             answers=[row["completion"] for row in rows],
         )
 
+    def _flush(self) -> None:
+        if self.flush_handle is not None:
+            self.flush_handle.cancel()
+            self.flush_handle = None
+        # The reference subprocess accepts one task kind per chunk.
+        groups = defaultdict(list)
+        for row, future in self.pending:
+            groups[row["kind"]].append((row, future))
+        self.pending = []
+        for entries in groups.values():
+            for start in range(0, len(entries), self.cfg.chunk_size):
+                task = asyncio.create_task(
+                    self._score_batch(entries[start : start + self.cfg.chunk_size])
+                )
+                self.scoring_tasks.add(task)
+                task.add_done_callback(self.scoring_tasks.discard)
+
+    async def _score_batch(
+        self, entries: list[tuple[dict[str, Any], asyncio.Future[float]]]
+    ) -> None:
+        rows, futures = zip(*entries, strict=True)
+        try:
+            scores = await asyncio.get_running_loop().run_in_executor(
+                self.pool, score_chunk, list(rows), self.cfg
+            )
+        except Exception as error:
+            # Every caller must receive grader failures, including batch timeouts.
+            for future in futures:
+                if not future.done():
+                    future.set_exception(error)
+        else:
+            for future, score in zip(futures, scores, strict=True):
+                if not future.done():
+                    future.set_result(score)
+
     def global_post_process_and_metrics(
         self, batch: BatchedDataDict[Any]
     ) -> tuple[BatchedDataDict[Any], dict[str, float]]:
         return batch, {}
 
-    def shutdown(self) -> None:
+    async def shutdown(self) -> None:
+        self._flush()
+        if self.scoring_tasks:
+            await asyncio.gather(*self.scoring_tasks)
         self.pool.shutdown(wait=True)
 
 
