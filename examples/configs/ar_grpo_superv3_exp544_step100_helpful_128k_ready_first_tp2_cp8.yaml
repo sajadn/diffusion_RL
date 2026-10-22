@@ -2,13 +2,13 @@
 # Native-RoPE Bridge with packed causal TE attention is required.
 defaults: ar_grpo_superv3_exp544_step100_helpful_128k_ready_first.yaml
 grpo:
-  num_prompts_per_step: 16
+  num_prompts_per_step: 120
   max_num_steps: 2
 checkpointing:
   save_period: 1
   checkpoint_must_save_by: "00:01:45:00"
 policy:
-  train_global_batch_size: 256
+  train_global_batch_size: 1920
   # CP zigzag and TP sequence sharding require 2 * CP * TP = 32.
   make_sequence_length_divisible_by: 32
   megatron_cfg:

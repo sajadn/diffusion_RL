@@ -1,5 +1,5 @@
 # 128K context, TP2 / CP8 / DP4, packed ready-first AR GRPO for 300 updates.
-# Keep the validated 16 prompt groups x 16 responses = 256-response batch.
+# Inherit 120 prompt groups x 16 responses = 1920 responses per update.
 defaults: ar_grpo_superv3_exp544_step100_helpful_128k_ready_first_tp2_cp8.yaml
 
 grpo:
