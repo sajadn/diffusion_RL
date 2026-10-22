@@ -1,0 +1,17 @@
+# One complete 256-token update and the full held-out HumanEval set.
+defaults: just_grpo-acecode-llada8b-2n8g-megatron-humaneval-long.yaml
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 16
+  max_num_steps: 1
+  val_at_start: false
+  val_at_end: true
+  val_period: 1
+
+checkpointing:
+  save_period: 1
+  checkpoint_must_save_by: "00:01:45:00"
+
+logger:
+  wandb_enabled: false

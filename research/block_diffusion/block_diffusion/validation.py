@@ -234,8 +234,18 @@ def validate_experiment(
             raise ValueError(
                 "Math requires the native processor and an explicit validation split"
             )
+    elif config.data.default.env_name == "justgrpo_code":
+        if (
+            diffusion.runtime != "megatron_llada"
+            or config.data.default.processor != "justgrpo_code"
+            or config.data.validation is None
+            or "justgrpo_code" not in config.env
+        ):
+            raise ValueError(
+                "Code requires LLaDA, the reference processor, and explicit validation"
+            )
     else:
-        raise ValueError("Supported environments are sudoku6x6 and math")
+        raise ValueError("Supported environments are sudoku6x6, math, and justgrpo_code")
     if g.max_num_epochs <= 0:
         raise ValueError("max_num_epochs must be positive")
     world_size = world

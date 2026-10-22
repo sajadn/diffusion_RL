@@ -103,7 +103,7 @@ training:
     gradient_accumulation_for_16_data_parallel_ranks: 4
 
 evaluation:
-  repository: nld-eval-next
+  repository: RL-research
   benchmark: HumanEval
   dataset:
     source: https://raw.githubusercontent.com/LeapLabTHU/JustGRPO/1a2fddb5c6655597e63081c0af5ebb718a849f39/datasets/HumanEval.jsonl.gz
@@ -160,9 +160,9 @@ integration:
   training_entrypoint: research/just_grpo/run_just_grpo.py
   # Migrated LLaDA support is present in this checkout; do not use the old worktree.
   llada_support_commit: 2d268aac3
-  missing:
-    - NeMo-RL AceCode-Hard data processor and reference-compatible code reward.
-    - Audit NeMo-RL advantage and loss normalization against released grpo.py.
-    - Roman evaluator LLaDA decoder and HumanEval prompt/grader recipe.
-    - Verified local training dataset and selected trained checkpoint paths.
-  jobs_submitted: false
+  training_recipe: research/just_grpo/configs/recipes/just_grpo-acecode-llada8b-2n8g-megatron-humaneval-long.yaml
+  smoke_recipe: research/just_grpo/configs/recipes/just_grpo-acecode-llada8b-2n8g-megatron-humaneval-smoke.yaml
+  implementation_notes:
+    - Uses the native NeMo-RL GRPO estimator and loss reductions, not bitwise reference training.
+    - Uses the unmodified pinned reference code reward and HumanEval grader.
+    - This document is a protocol specification; launch the training recipe above.

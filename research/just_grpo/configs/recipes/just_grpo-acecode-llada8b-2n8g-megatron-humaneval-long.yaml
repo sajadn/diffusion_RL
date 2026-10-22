@@ -1,0 +1,100 @@
+# JustGRPO code training: 20,822 AceCode-Hard rows; HumanEval's 164 held-out tasks.
+# Full FT, synchronous AR-order rollouts, 64 prompts x 16 completions, 125 updates.
+# 16 H100s match the paper's GPU count; microbatching is an execution setting.
+defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-megatron-inference-long.yaml
+
+grpo:
+  num_updates_per_rollout: 1
+  val_num_generations_per_prompt: 1
+  # Native validation floors samples/batch: eleven batches include the final four.
+  max_val_samples: 176
+  val_batch_size: 16
+
+loss_fn:
+  use_importance_sampling_correction: false
+
+just_grpo:
+  _override_: true
+  distributed: true
+  runtime: megatron_llada
+  generation_python: null
+  max_generation_kl: .inf
+  generation_batch_size: 1
+  training_token_fraction: 1.0
+  schedule:
+    mask_token_id: 126336
+    block_size: 256
+    reveal_tokens_per_step: 1
+  sampling:
+    temperature: 1.0
+    block_size: 256
+    max_steps: 256
+    selection_policy: leftmost
+    threshold: 0.9
+    returns_reveal_steps: false
+    returns_entropy: false
+  validation_sampling:
+    temperature: 0.0
+    block_size: 32
+    max_steps: 32
+    selection_policy: low_confidence
+    threshold: 0.9
+    returns_reveal_steps: false
+    returns_entropy: false
+  validation_modes: {}
+
+policy:
+  # Input bounds come from the full-dataset tokenizer audit, without filtering.
+  max_total_sequence_length: ${oc.decode:${oc.env:LLADA_CODE_SEQUENCE_LENGTH}}
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  generation:
+    val_temperature: 0.0
+
+data:
+  _override_: true
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  max_input_seq_length: ${oc.decode:${oc.env:LLADA_CODE_MAX_PROMPT_TOKENS}}
+  train:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:LLADA_CODE_DATA_DIR}/train.jsonl
+    input_key: problem
+    output_key: answer
+    split: train
+  validation:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:LLADA_CODE_DATA_DIR}/validation.jsonl
+    input_key: problem
+    output_key: answer
+    split: train
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: justgrpo_code
+    env_name: justgrpo_code
+
+env:
+  _override_: true
+  justgrpo_code:
+    reference_dir: ${oc.env:JUSTGRPO_REFERENCE_DIR}
+    reference_revision: 1a2fddb5c6655597e63081c0af5ebb718a849f39
+    python_executable: ${oc.env:POLICY_PYTHON}
+    num_workers: 8
+    chunk_size: 16
+    timeout_seconds: 600
+
+checkpointing:
+  save_period: 10
+  ft_save_period: 1
+  checkpoint_must_save_by: "00:03:30:00"
+
+logger:
+  log_dir: ${oc.env:LOG_DIR,logs/llada_acecode_humaneval}
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,llada_acecode_humaneval}
+
+cluster:
+  num_nodes: 2
+  gpus_per_node: 8

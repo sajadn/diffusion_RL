@@ -32,6 +32,11 @@ from nemo_rl.utils.config import (
 def run(config: DictConfig, *, evaluation_only: bool = False) -> None:
     """Validate JustGRPO settings and start the shared training loop."""
     diffusion = validate_config(config)
+    if config.data.default.env_name == "justgrpo_code":
+        # Code grading brings optional reference dependencies only for this task.
+        from just_grpo.environments.code_reference import register_code_reference
+
+        register_code_reference()
     if diffusion.runtime == "megatron_llada":
         # Load the optional LLaDA adapter only for its shared-worker runtime.
         from just_grpo.generation.llada_generation import validate_llada
