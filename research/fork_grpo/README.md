@@ -70,6 +70,19 @@ It validates all 500 problems once each at temperature 0.6, at the start, every
 10 updates, and at the end. Checkpoints are saved every 10 updates, with a
 3-hour-30-minute save deadline for the four-hour allocation.
 
+For matched Nemotron MATH-500 decoding comparisons, use
+`configs/recipes/fork_grpo-math12k-3b-4n8g-megatron-vllm-async-multieval-long.yaml`.
+It retains the three validation modes from
+`trace_math12k_eb01_te1_ts06_sync_20261019`: entropy budget 0.1 with entropy
+temperature 1.0, confidence threshold 0.9, and AR. It adds `diffusion_fork`
+with confidence threshold 0.9 and leftmost fallback. All modes sample at 0.6,
+use the same 3,744-token response budget, and validate all 500 problems.
+The existing `MultiModeValidation` handles engine sleep, refits, and named metrics;
+training retains the original asynchronous 2+2 node split and three replay views.
+The runtime must support `entropy_temperature` as well as explicit Fork metadata.
+Checkpoint ranking uses `val:accuracy/diffusion_entropy_budget` so earlier
+Fork-only validation scores are not compared with the new primary decoder.
+
 ## LLaDA full-canvas replay
 
 Use `configs/recipes/fork_grpo-math12k-llada8b-canvas256-4n8g-megatron-long.yaml`

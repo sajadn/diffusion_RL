@@ -1,0 +1,74 @@
+# Match trace_math12k_eb01_te1_ts06_sync_20261019 validation and add Fork.
+# Training retains three fallback replay views and the original 2+2 node split.
+defaults: ./fork_grpo-math12k-3b-4n8g-megatron-vllm-async-long.yaml
+policy:
+  generation:
+    vllm_val_dllm_variants:
+      diffusion_entropy_budget:
+        temperature: 0.6
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          hf_overrides:
+            architectures:
+            - NemotronLabsDiffusionModel
+            block_size: 16
+          diffusion_config:
+            canvas_length: 16
+            max_denoising_steps: 16
+            selection_policy: entropy_budget
+            entropy_bound: 0.1
+            confidence_threshold: 0.9
+            temperature: 0.6
+            emit_full_blocks: false
+            return_reveal_steps: false
+            return_entropy: false
+            entropy_temperature: 1.0
+      diffusion_conf09:
+        temperature: 0.6
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          hf_overrides:
+            architectures:
+            - NemotronLabsDiffusionModel
+            block_size: 16
+          diffusion_config:
+            canvas_length: 16
+            max_denoising_steps: 16
+            selection_policy: confidence_threshold
+            confidence_threshold: 0.9
+            temperature: 0.6
+            emit_full_blocks: false
+            return_reveal_steps: false
+            return_entropy: false
+      ar:
+        temperature: 0.6
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          hf_overrides:
+            architectures:
+            - NemotronLabsDiffusionForCausalLM
+            block_size: 16
+          diffusion_config: null
+      diffusion_fork:
+        temperature: 0.6
+        vllm_cfg:
+          gpu_memory_utilization: 0.55
+        vllm_kwargs:
+          hf_overrides:
+            architectures:
+            - NemotronLabsDiffusionModel
+            block_size: 16
+          diffusion_config:
+            canvas_length: 16
+            max_denoising_steps: 16
+            selection_policy: confidence_threshold_leftmost
+            confidence_threshold: 0.9
+            temperature: 0.6
+            emit_full_blocks: false
+            return_reveal_steps: false
+            return_entropy: false
+checkpointing:
+  metric_name: val:accuracy/diffusion_entropy_budget

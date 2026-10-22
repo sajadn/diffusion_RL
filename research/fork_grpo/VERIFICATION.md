@@ -1,3 +1,22 @@
+# Nemotron MATH-12K four-mode continuation (2026-10-21)
+
+- Reuses `MultiModeValidation` for entropy-budget, confidence-0.9, AR, and
+  additional Fork decoding. The first three mode dictionaries are checked for
+  exact equality with `trace_math12k_eb01_te1_ts06_sync_20261019`.
+- Multi-mode and async lifecycle regression tests: **41 passed**.
+- The current vLLM sampler and the Trace reference sampler both pass the same
+  independent scalar entropy-budget checks at coupled entropy temperature and
+  explicit entropy temperature 1.0. Checks cover selection, absorbing positions,
+  padding, sampled-token frequencies, logprobs, and emitted sampling entropy.
+  These checks run the sampler body on CPU; they do not establish GPU execution.
+- The continuation gates training on compiled GPU sampler tests, including
+  separate entropy temperatures and the existing Fork fallback semantics.
+- The recipe retains the original four-node 2+2 split, optimizer/scheduler target
+  of 100 updates, three replay views, and 3,744-token generation budget.
+  It resumes the latest finalized checkpoint and validates optimizer shard sizes.
+- Checkpoint ranking uses the named entropy-budget metric to avoid mixing old
+  Fork-only scores with the new primary evaluation mode.
+
 # Baseline-matched LLaDA validation (2026-10-21)
 
 - MATH-12K and the new GSM8K recipe use the primary JustGRPO `fixed1_t1`
