@@ -1,30 +1,30 @@
-# 64K context, 54K thinking, 56K output; packed ready-first AR GRPO.
+# 128K total context, 54K thinking, 64K output; packed ready-first AR GRPO.
 # Preserve the 300-update target and TP2 / CP8 / DP4 training topology.
 defaults: ar_grpo_superv3_exp544_step100_helpful_128k_ready_first_tp2_cp8_300steps.yaml
 
 policy:
-  max_total_sequence_length: 65536
+  max_total_sequence_length: 131072
   tokenizer:
     chat_template_kwargs:
       reasoning_budget: 55296
   megatron_cfg:
     model_overrides:
-      seq_length: 65536
+      seq_length: 131072
   dynamic_batching:
-    train_mb_tokens: 65536
-    logprob_mb_tokens: 65536
+    train_mb_tokens: 131072
+    logprob_mb_tokens: 131072
   sequence_packing:
-    train_mb_tokens: 65536
-    logprob_mb_tokens: 65536
+    train_mb_tokens: 131072
+    logprob_mb_tokens: 131072
   generation:
-    max_new_tokens: 57344
+    max_new_tokens: 65536
     vllm_cfg:
-      max_model_len: 65536
+      max_model_len: 131072
     mcore_generation_config:
-      max_model_len: 65536
-      max_tokens: 57344
+      max_model_len: 131072
+      max_tokens: 65536
     sglang_cfg:
-      context_length: 65536
+      context_length: 131072
 
 grpo:
   reward_shaping:
