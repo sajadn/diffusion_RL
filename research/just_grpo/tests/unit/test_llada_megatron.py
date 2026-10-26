@@ -519,3 +519,33 @@ def test_named_validation_replays_data_restores_decoder_and_plots(
     calls = group.run_all_workers_single_data.call_args_list
     assert [c.kwargs["enabled"] for c in calls] == [True, False] * evaluated
     assert [c.kwargs["mode"] for c in calls[::2]] == modes[:evaluated]
+
+
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+@pytest.mark.parametrize("threshold", [0.7, 0.9])
+@pytest.mark.parametrize("named_mode", [False, True])
+def test_llada_fork_validation_modes(
+    temperature: float, threshold: float, named_mode: bool
+) -> None:
+    register_omegaconf_resolvers()
+    recipe = (
+        Path(__file__).resolve().parents[2]
+        / "configs/recipes/just_grpo-gsm8k-llada8b-canvas256-16n8g-megatron-inference-long.yaml"
+    )
+    config = load_config(recipe)
+    params = dict(
+        config.just_grpo.validation_sampling,
+        selection_policy="fork",
+        temperature=temperature,
+        threshold=threshold,
+    )
+    if named_mode:
+        config.just_grpo.validation_modes = {"fork": params}
+        selected = config.just_grpo.validation_modes.fork
+    else:
+        config.just_grpo.validation_sampling = params
+        selected = config.just_grpo.validation_sampling
+    validate_config(config)
+    selected.max_steps = 16
+    with pytest.raises(ValueError, match="Fixed parallel"):
+        validate_config(config)

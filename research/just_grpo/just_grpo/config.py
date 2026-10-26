@@ -89,16 +89,20 @@ class JustGRPOConfig(DiffusionExperimentConfig):
                 raise ValueError("LLaDA supports exact one-token JustGRPO replay only")
             for v in (self.validation_sampling, *self.validation_modes.values()):
                 if (
-                    v.selection_policy not in ("low_confidence", "confidence_threshold")
+                    v.selection_policy not in (
+                        "low_confidence",
+                        "confidence_threshold",
+                        "fork",
+                    )
                     or not 1 <= v.max_steps <= v.block_size
                     or v.block_size % v.max_steps
                 ):
                     raise ValueError(
-                        "LLaDA evaluation requires confidence unmasking with at most one pass per canvas token"
+                        "LLaDA evaluation requires confidence or Fork unmasking with at most one pass per canvas token"
                     )
                 if (
                     v.max_steps != v.block_size
-                    and v.selection_policy == "confidence_threshold"
+                    and v.selection_policy in ("confidence_threshold", "fork")
                 ):
                     raise ValueError(
                         "Fixed parallel LLaDA evaluation requires low_confidence"
