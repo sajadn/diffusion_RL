@@ -19,11 +19,11 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-
 from block_diffusion.generation.reference_vllm import (
-    ReferenceVllmWorkerImpl,
     ReferenceVllmAsyncWorkerImpl,
+    ReferenceVllmWorkerImpl,
 )
+
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 from nemo_rl.models.generation.vllm.vllm_worker import VllmGenerationWorkerImpl
 
@@ -93,6 +93,8 @@ def test_context_reserves_diffusion_canvas_and_delegates_output_packing(
         input_ids=torch.ones((1, 16), dtype=torch.long),
         input_lengths=torch.tensor([16]),
     )
+    worker.llm = Mock()
+    worker.llm.collective_rpc.return_value = [{"nfe": 16, "committed_tokens": 16}]
     generate = Mock(return_value=object())
     monkeypatch.setattr(VllmGenerationWorkerImpl, "generate", generate)
     if max_model_len == 47:
@@ -107,6 +109,7 @@ def test_context_reserves_diffusion_canvas_and_delegates_output_packing(
 @pytest.mark.parametrize("max_model_len", [47, 48])
 def test_async_context_check_and_native_stream_delegation(monkeypatch, max_model_len):
     import asyncio
+
     from nemo_rl.models.generation.vllm.vllm_worker_async import (
         VllmAsyncGenerationWorkerImpl,
     )
@@ -187,3 +190,28 @@ def test_reference_fork_metadata_preserves_false_flags_and_terminal_canvas(
         completion.fallback_mask = invalid
         with pytest.raises(ValueError, match="fallback flag"):
             worker._completion_metadata(completion, input_length=2, padded_length=8)
+
+
+def test_sync_diffusion_metrics_survive_engine_sleep(monkeypatch):
+    worker = object.__new__(ReferenceVllmWorkerImpl)
+    worker.cfg = dict(
+        max_new_tokens=16,
+        vllm_cfg={"max_model_len": 48},
+        vllm_kwargs={"diffusion_config": {"canvas_length": 16}},
+    )
+    worker.llm = Mock()
+    worker.llm.collective_rpc.return_value = [{"nfe": 16, "committed_tokens": 16}]
+    batch = BatchedDataDict(
+        input_ids=torch.ones((1, 16), dtype=torch.long),
+        input_lengths=torch.tensor([16]),
+    )
+    monkeypatch.setattr(VllmGenerationWorkerImpl, "generate", Mock(return_value=batch))
+    monkeypatch.setattr(VllmGenerationWorkerImpl, "_get_raw_spec_counters", lambda _: {})
+    worker.generate(batch)
+    worker.generate(batch)
+    # Metrics are polled after sleep; device-side counters are inaccessible then.
+    worker.llm.collective_rpc.side_effect = RuntimeError("engine is asleep")
+    assert worker._get_raw_spec_counters() == {
+        "vllm:diffusion_num_denoising_steps": 32.0,
+        "vllm:diffusion_num_committed_tokens": 32.0,
+    }

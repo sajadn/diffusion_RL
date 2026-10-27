@@ -213,3 +213,28 @@ def test_production_accepts_128_dp_ranks_with_eight_completions_each(auxiliary):
     assert config.policy.train_global_batch_size // dp == 8
     assert parsed.schedule.block_size == 256
     assert parsed.validation_sampling.block_size == 32
+
+
+@pytest.mark.parametrize("stop_early", [False, True])
+def test_vllm_llada_requires_complete_canvas(stop_early):
+    from pathlib import Path
+
+    from just_grpo.config import validate_config
+
+    from nemo_rl.utils.config import load_config, register_omegaconf_resolvers
+
+    register_omegaconf_resolvers()
+    recipe = (
+        Path(__file__).parents[2]
+        / "configs/recipes"
+        / "just_grpo-acecode-llada8b-2n8g-megatron-humaneval-vllm-smoke.yaml"
+    )
+    config = load_config(recipe)
+    if stop_early:
+        config.policy.generation.stop_token_ids = [126081]
+        with pytest.raises(ValueError, match="complete canvas"):
+            validate_config(config)
+    else:
+        parsed = validate_config(config)
+        assert parsed.runtime == "reference_vllm"
+        assert parsed.max_generation_kl == 0.001

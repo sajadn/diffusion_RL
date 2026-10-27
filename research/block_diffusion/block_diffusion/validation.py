@@ -35,6 +35,10 @@ def validate_experiment(
     if variants and diffusion.runtime != "reference_vllm":
         raise ValueError("Multi-mode validation requires reference_vllm generation")
     g, p, loss = config.grpo, config.policy, config.loss_fn
+    # LLaDA replays its full canvas whichever engine generated it.
+    llada_worker = p.worker_extension_cls_fqn == (
+        "just_grpo.algorithms.llada_policy_worker.LLaDAJustGRPOPolicyWorker"
+    )
     if p.get("diffusion_aux_loss") is not None:
         resolve_positive_diffusion_config(
             OmegaConf.to_container(p.diffusion_aux_loss, resolve=True),
@@ -236,7 +240,7 @@ def validate_experiment(
             )
     elif config.data.default.env_name == "justgrpo_code":
         if (
-            diffusion.runtime != "megatron_llada"
+            not llada_worker
             or config.data.default.processor != "justgrpo_code"
             or config.data.validation is None
             or "justgrpo_code" not in config.env
@@ -255,7 +259,7 @@ def validate_experiment(
         data_parallel_size = world_size // p.megatron_cfg.tensor_model_parallel_size
         if world_size < 1:
             raise ValueError("Distributed training requires at least one policy GPU")
-        if diffusion.runtime == "megatron_llada":
+        if llada_worker:
             if p.train_global_batch_size % data_parallel_size:
                 raise ValueError(
                     "LLaDA requires complete completion shards per DP rank"
@@ -275,7 +279,7 @@ def validate_experiment(
         raise ValueError("Validation must use the training sampling settings")
     if g.max_val_samples < g.val_batch_size:
         raise ValueError("max_val_samples must include at least one val_batch_size")
-    if diffusion.runtime == "megatron_llada":
+    if diffusion.runtime == "megatron_llada" or llada_worker:
         if g.async_grpo.enabled or not p.generation.colocated.enabled:
             raise ValueError(
                 "LLaDA shared workers require synchronous colocated generation"

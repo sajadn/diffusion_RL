@@ -32,12 +32,12 @@ from nemo_rl.models.generation.vllm.vllm_worker_async import (
 )
 
 
-def _read_diffusion_counters(worker: Any) -> dict[str, int]:
-    """Read sampler counters in the engine process without resetting them."""
+def _read_diffusion_counters(worker: Any, reset: bool = False) -> dict[str, int]:
+    """Read sampler counters, optionally resetting the current generation window."""
     # The diffusion fork is only installed in generation workers.
     from vllm.model_executor.models.nemotron_dllm import get_diffusion_tpf_stats
 
-    return get_diffusion_tpf_stats()
+    return get_diffusion_tpf_stats(reset=reset)
 
 
 def _diffusion_counters(reports: list[dict[str, int]]) -> dict[str, float]:
@@ -147,11 +147,16 @@ class _ReferenceDiffusionSampling:
 
 
 class ReferenceVllmWorkerImpl(_ReferenceDiffusionSampling, VllmGenerationWorkerImpl):
+    # The sampler counters live in device memory that sleep discards, and step
+    # metrics are read after the engine sleeps: accumulate on the host instead.
+    _diffusion_totals: dict[str, float] | None = None
+
     def _get_raw_spec_counters(self) -> dict[str, float | list[float]]:
         metrics = super()._get_raw_spec_counters()
         if self.cfg["vllm_kwargs"]["diffusion_config"] is not None:
             metrics.update(
-                _diffusion_counters(self.llm.collective_rpc(_read_diffusion_counters))
+                self._diffusion_totals
+                or _diffusion_counters([{"nfe": 0, "committed_tokens": 0}])
             )
         return metrics
 
@@ -159,7 +164,17 @@ class ReferenceVllmWorkerImpl(_ReferenceDiffusionSampling, VllmGenerationWorkerI
         self, data: BatchedDataDict[GenerationDatumSpec], greedy: bool = False
     ) -> BatchedDataDict[GenerationOutputSpec]:
         self._validate_context(data)
-        return super().generate(data, greedy=greedy)
+        if self.cfg["vllm_kwargs"]["diffusion_config"] is None:
+            return super().generate(data, greedy=greedy)
+        # Wake-up may remap the counters to unspecified contents: start from zero.
+        self.llm.collective_rpc(_read_diffusion_counters, args=(True,))
+        output = super().generate(data, greedy=greedy)
+        window = _diffusion_counters(
+            self.llm.collective_rpc(_read_diffusion_counters, args=(True,))
+        )
+        totals = self._diffusion_totals or dict.fromkeys(window, 0.0)
+        self._diffusion_totals = {k: totals[k] + v for k, v in window.items()}
+        return output
 
 
 class ReferenceVllmAsyncWorkerImpl(

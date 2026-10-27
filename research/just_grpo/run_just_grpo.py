@@ -53,6 +53,19 @@ def run(config: DictConfig, *, evaluation_only: bool = False) -> None:
                 canvas_length=diffusion.schedule.block_size,
             ),
         )
+    elif config.policy.worker_extension_cls_fqn == (
+        "just_grpo.algorithms.llada_policy_worker.LLaDAJustGRPOPolicyWorker"
+    ):
+        # LLaDA replays on its full canvas whichever engine generated it.
+        training.run(
+            config,
+            diffusion=diffusion,
+            evaluation_only=evaluation_only,
+            prepare_training_data_factory=partial(
+                make_llada_training_data_preparer,
+                canvas_length=diffusion.schedule.block_size,
+            ),
+        )
     else:
         training.run(config, diffusion=diffusion, evaluation_only=evaluation_only)
 

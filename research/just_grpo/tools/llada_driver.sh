@@ -10,6 +10,7 @@ if [[ "$CONFIG" == *smoke* && "$CONFIG" != *resume* ]]; then
     research/just_grpo/tests/unit/test_megatron_adapter.py \
     research/just_grpo/tests/unit/test_llada_bridge_serialization.py \
     research/just_grpo/tests/unit/test_llada_megatron.py \
+    research/just_grpo/tests/unit/test_native_vllm_generation.py \
     research/block_diffusion/tests/unit/test_positive_diffusion_level.py -q
   export UV_CACHE_DIR="${OUTPUT_DIR}/uv_cache"
 fi
