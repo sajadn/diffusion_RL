@@ -56,11 +56,18 @@ def run(config: DictConfig, *, evaluation_only: bool = False) -> None:
     elif config.policy.worker_extension_cls_fqn == (
         "just_grpo.algorithms.llada_policy_worker.LLaDAJustGRPOPolicyWorker"
     ):
+        from just_grpo.generation.llada_generation import make_llada_policy_validator
+
         # LLaDA replays on its full canvas whichever engine generated it.
         training.run(
             config,
             diffusion=diffusion,
             evaluation_only=evaluation_only,
+            validation_fn_factory=(
+                make_llada_policy_validator
+                if diffusion.validation_runtime == "megatron_llada"
+                else None
+            ),
             prepare_training_data_factory=partial(
                 make_llada_training_data_preparer,
                 canvas_length=diffusion.schedule.block_size,

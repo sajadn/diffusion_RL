@@ -1,0 +1,32 @@
+# vLLM full-canvas rollouts with the reference Megatron validation decoders.
+defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-megatron-inference-long.yaml
+
+just_grpo:
+  runtime: reference_vllm
+  validation_runtime: megatron_llada
+  max_generation_kl: 0.001
+
+policy:
+  generation:
+    backend: vllm
+    refit_transport: null
+    worker_extension_cls_fqn: block_diffusion.generation.reference_vllm.ReferenceVllmWorker
+    stop_token_ids: []
+    ignore_eos: true
+    vllm_cfg:
+      async_engine: false
+      gpu_memory_utilization: 0.5
+      max_model_len: 1024
+      enforce_eager: true
+      enable_prefix_caching: false
+    vllm_kwargs:
+      max_num_seqs: 4
+      max_num_batched_tokens: 4096
+      diffusion_config:
+        canvas_length: ${just_grpo.sampling.block_size}
+        max_denoising_steps: ${just_grpo.sampling.max_steps}
+        temperature: ${just_grpo.sampling.temperature}
+        selection_policy: ${just_grpo.sampling.selection_policy}
+        confidence_threshold: ${just_grpo.sampling.threshold}
+        return_entropy: ${just_grpo.sampling.returns_entropy}
+        return_reveal_steps: ${just_grpo.sampling.returns_reveal_steps}

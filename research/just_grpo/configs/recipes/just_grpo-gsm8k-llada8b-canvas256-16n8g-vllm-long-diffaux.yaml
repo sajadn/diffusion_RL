@@ -1,0 +1,9 @@
+defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long.yaml
+
+policy:
+  diffusion_aux_loss:
+    weight: 0.1
+    positive_samples: advantage
+    mask_probability_min: 0.05
+    mask_probability_max: 1.0
+    seed: 42

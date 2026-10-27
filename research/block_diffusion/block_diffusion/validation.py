@@ -274,6 +274,7 @@ def validate_experiment(
             )
     if (
         diffusion.runtime != "megatron_llada"
+        and not llada_worker
         and diffusion.validation_sampling != diffusion.sampling
     ):
         raise ValueError("Validation must use the training sampling settings")
@@ -383,6 +384,7 @@ def validate_experiment(
             raise ValueError("max_new_tokens must be a multiple of each canvas size")
     if diffusion.sampling.temperature != p.generation.temperature or (
         diffusion.runtime != "megatron_llada"
+        and not llada_worker
         and diffusion.validation_sampling.temperature != p.generation.val_temperature
     ):
         raise ValueError("Diffusion temperatures must match policy.generation settings")

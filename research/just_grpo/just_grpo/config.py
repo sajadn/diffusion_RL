@@ -14,7 +14,7 @@
 """Configuration types and validation; experiment defaults live in YAML."""
 
 import re
-from typing import Self
+from typing import Literal, Self
 
 from block_diffusion.config import (
     BlockDiffusionConfig,
@@ -45,6 +45,10 @@ class JustGRPOConfig(DiffusionExperimentConfig):
     training_token_fraction: float = Field(gt=0, le=1)
     schedule: ScheduleConfig
     validation_modes: dict[str, DiffusionSamplingParams] = Field(default_factory=dict)
+    validation_runtime: Literal["generation", "megatron_llada"] = Field(
+        default="generation",
+        description="Use the rollout engine, or the live LLaDA policy for validation.",
+    )
 
     @model_validator(mode="after")
     def validate_training_distribution(self) -> Self:
@@ -61,7 +65,18 @@ class JustGRPOConfig(DiffusionExperimentConfig):
             raise ValueError("Generation steps must match the training reveal schedule")
         if self.training_token_fraction < 1 and s.reveal_tokens_per_step != 1:
             raise ValueError("Fast partial views require one token per reveal")
-        if self.validation_modes and self.runtime != "megatron_llada":
+        llada_validation = (
+            self.runtime == "megatron_llada"
+            or self.validation_runtime == "megatron_llada"
+        )
+        if self.validation_runtime == "megatron_llada" and self.runtime not in (
+            "megatron_llada",
+            "reference_vllm",
+        ):
+            raise ValueError(
+                "Megatron LLaDA validation requires a LLaDA-compatible runtime"
+            )
+        if self.validation_modes and not llada_validation:
             raise ValueError("Named LLaDA validation modes require megatron_llada")
         if any(
             not re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in self.validation_modes
@@ -84,7 +99,7 @@ class JustGRPOConfig(DiffusionExperimentConfig):
             raise ValueError(
                 "Upstream generation cannot yet replay leftmost reveals; use megatron or reference_vllm"
             )
-        if self.runtime == "megatron_llada":
+        if llada_validation:
             if s.reveal_tokens_per_step != 1 or self.training_token_fraction != 1:
                 raise ValueError("LLaDA supports exact one-token JustGRPO replay only")
             for v in (self.validation_sampling, *self.validation_modes.values()):
@@ -119,5 +134,20 @@ def validate_config(config: DictConfig) -> JustGRPOConfig:
     diffusion = JustGRPOConfig.model_validate(
         OmegaConf.to_container(config.just_grpo, resolve=True)
     )
+    llada_worker = config.policy.worker_extension_cls_fqn == (
+        "just_grpo.algorithms.llada_policy_worker.LLaDAJustGRPOPolicyWorker"
+    )
+    if diffusion.validation_runtime == "megatron_llada" and not llada_worker:
+        raise ValueError(
+            "Megatron LLaDA validation requires the full-canvas LLaDA worker"
+        )
+    if llada_worker and diffusion.runtime != "megatron_llada":
+        if diffusion.validation_runtime != "megatron_llada" and (
+            diffusion.validation_sampling != diffusion.sampling
+            or diffusion.validation_modes
+        ):
+            raise ValueError(
+                "Separate LLaDA validation decoders require validation_runtime=megatron_llada"
+            )
     validate_experiment(config, diffusion)
     return diffusion

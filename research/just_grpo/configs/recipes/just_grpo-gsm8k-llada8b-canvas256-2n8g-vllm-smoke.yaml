@@ -1,0 +1,19 @@
+defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long-diffaux.yaml
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 16
+  max_num_steps: 2
+  val_period: 1
+  max_val_samples: 16
+  val_batch_size: 16
+cluster:
+  num_nodes: 2
+checkpointing:
+  enabled: false
+logger:
+  wandb_enabled: false
+
+policy:
+  train_micro_batch_size: 2
+  logprob_batch_size: 2

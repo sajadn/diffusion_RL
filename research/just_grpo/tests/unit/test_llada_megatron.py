@@ -549,3 +549,70 @@ def test_llada_fork_validation_modes(
     selected.max_steps = 16
     with pytest.raises(ValueError, match="Fixed parallel"):
         validate_config(config)
+
+
+@pytest.mark.parametrize("auxiliary", [False, True])
+def test_vllm_gsm8k_preserves_megatron_validation(auxiliary):
+    register_omegaconf_resolvers()
+    suffix = "-diffaux" if auxiliary else ""
+    recipe = (
+        Path(__file__).resolve().parents[2]
+        / "configs/recipes"
+        / ("just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long" + suffix + ".yaml")
+    )
+    config = load_config(recipe)
+    diffusion = validate_config(config)
+    assert diffusion.runtime == "reference_vllm"
+    assert diffusion.validation_runtime == "megatron_llada"
+    assert len(diffusion.validation_modes) == 4
+    assert config.policy.train_global_batch_size == 1024
+    assert bool(config.policy.get("diffusion_aux_loss")) is auxiliary
+    config.just_grpo.validation_runtime = "generation"
+    with pytest.raises(ValueError):
+        validate_config(config)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_policy_validation_restores_rollout_lifecycle(monkeypatch, fail):
+    from just_grpo.generation import llada_generation
+
+    events = []
+    policy = MagicMock()
+    policy.prepare_for_lp_inference.side_effect = lambda: events.append("policy_on")
+    policy.offload_after_refit.side_effect = lambda: events.append("policy_off")
+    generation = MagicMock()
+    generation.finish_generation.side_effect = lambda: events.append("sleep") or True
+    generation.prepare_for_generation.side_effect = (
+        lambda: events.append("wake") or True
+    )
+    adapter = object()
+    monkeypatch.setattr(llada_megatron, "LLaDAMegatronGeneration", lambda **kw: adapter)
+
+    def validate(actual_adapter, *args, **kwargs):
+        assert actual_adapter is adapter
+        events.append("validate")
+        if fail:
+            raise ValueError("validation failed")
+        return {"accuracy": 0.5}, {}
+
+    monkeypatch.setattr(llada_generation, "validate_llada", validate)
+    validator = llada_generation.make_llada_policy_validator(policy=policy, config=None)
+    if fail:
+        with pytest.raises(ValueError, match="validation failed"):
+            validator(generation)
+    else:
+        assert validator(generation) == ({"accuracy": 0.5}, {})
+    assert events == ["sleep", "policy_on", "validate", "policy_off", "wake"]
+
+
+def test_vllm_gsm8k_smoke_config():
+    register_omegaconf_resolvers()
+    config = load_config(
+        Path(__file__).resolve().parents[2]
+        / "configs/recipes"
+        / "just_grpo-gsm8k-llada8b-canvas256-2n8g-vllm-smoke.yaml"
+    )
+    validate_config(config)
+    assert config.policy.train_global_batch_size == 32
+    assert config.policy.train_micro_batch_size == 2
+    assert config.grpo.val_at_start and config.grpo.val_at_end

@@ -41,6 +41,7 @@ def run(
     generation_python: str | None = None,
     generation_factory: Callable[..., Any] | None = None,
     validation_fn: Callable[..., tuple[dict[str, Any], dict[str, Any]]] | None = None,
+    validation_fn_factory: Callable[..., Callable[..., Any]] | None = None,
     prepare_training_data_factory: Callable[[list[int]], PrepareTrainingData]
     | None = None,
 ) -> None:
@@ -52,10 +53,13 @@ def run(
         diffusion: Parsed diffusion algorithm configuration; None selects causal AR.
         generation_factory: Optional dedicated adapter or shared Megatron adapter.
         validation_fn: Optional validator using the controller's validation timing.
+        validation_fn_factory: Build a validator from the initialized policy and config.
         generation_python: Optional Python executable for the rollout and validation engines.
         prepare_training_data_factory: Optional algorithm callback factory, called
             with the tokenizer-resolved stop token IDs before training starts.
     """
+    if validation_fn is not None and validation_fn_factory is not None:
+        raise ValueError("Choose a validation function or a factory, not both")
     # The full controller imports optional training and tracking dependencies.
     from block_diffusion.environments.sudoku import (
         SudokuEnvironment,
@@ -128,7 +132,9 @@ def run(
         if variants
         else None
     )
-    if validation is not None and validation_fn is not None:
+    if validation is not None and (
+        validation_fn is not None or validation_fn_factory is not None
+    ):
         raise ValueError("Custom validation cannot be combined with vLLM variants")
     setup_kwargs = (
         {
@@ -187,6 +193,8 @@ def run(
                 colocated=True,
             )
             generation.weight_synchronizer.init_communicator()
+        if validation_fn_factory is not None:
+            validation_fn = validation_fn_factory(policy=policy, config=master)
         if evaluation_only:
             if validation_fn is None:
                 raise ValueError("Evaluation-only execution requires a validator")

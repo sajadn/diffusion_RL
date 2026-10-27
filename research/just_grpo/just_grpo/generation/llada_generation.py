@@ -132,3 +132,27 @@ def validate_llada(
             )
             logger.log_plot(figure, step, "validation/accuracy_vs_nfe")
     return metrics, timings
+
+
+def make_llada_policy_validator(*, policy: Any, config: Any) -> Any:
+    """Validate on the live policy while the colocated rollout engine sleeps."""
+    from just_grpo.generation.llada_megatron import LLaDAMegatronGeneration
+
+    adapter = LLaDAMegatronGeneration(policy=policy, config=config)
+
+    def validate_policy(generation: Any, *args: Any, **kwargs: Any) -> Any:
+        # The native controller enters validation with the rollout engine awake.
+        # Restore that lifecycle on exit, including when validation raises.
+        if not generation.finish_generation():
+            raise RuntimeError("Failed to sleep the rollout engine before validation")
+        try:
+            policy.prepare_for_lp_inference()
+            return validate_llada(adapter, *args, **kwargs)
+        finally:
+            policy.offload_after_refit()
+            if not generation.prepare_for_generation():
+                raise RuntimeError(
+                    "Failed to restore the rollout engine after validation"
+                )
+
+    return validate_policy

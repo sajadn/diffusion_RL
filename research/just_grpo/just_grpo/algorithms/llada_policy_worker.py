@@ -111,7 +111,10 @@ class LLaDAJustGRPOPolicyWorkerImpl(MegatronDiffusionPolicyWorkerImpl):
         self, *, data: BatchedDataDict[Any], greedy: bool = False
     ) -> BatchedDataDict[Any]:
         """Sample from the live training model without a second model or refit."""
-        if self.cfg["generation"]["backend"] != "megatron":
+        if self.cfg["generation"]["backend"] != "megatron" and not (
+            self.validation_mode
+            and self.diffusion.validation_runtime == "megatron_llada"
+        ):
             raise ValueError("Shared LLaDA generation requires the Megatron backend")
         if parallel_state.get_tensor_model_parallel_world_size() != 1:
             raise ValueError("Shared LLaDA generation currently requires TP=1")
