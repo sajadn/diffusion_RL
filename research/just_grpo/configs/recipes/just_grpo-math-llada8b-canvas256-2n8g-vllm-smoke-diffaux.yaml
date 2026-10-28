@@ -1,0 +1,14 @@
+defaults: just_grpo-math-llada8b-canvas256-2n8g-vllm-smoke.yaml
+
+policy:
+  diffusion_aux_loss:
+    weight: 0.1
+    positive_samples: advantage
+    mask_probability_min: 0.05
+    mask_probability_max: 1.0
+    seed: 42
+
+logger:
+  log_dir: ${oc.env:LOG_DIR,logs/llada_math_canvas256_vllm_greedy_smoke_diffaux}
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,llada_math_canvas256_vllm_greedy_smoke_diffaux}

@@ -208,3 +208,11 @@ checkpoint metric. They retain the accuracy-versus-NFE plots and training-step
 history. Validation uses the live Megatron policy with 32-token selection blocks
 within the 256-token bidirectional canvas. The optional vLLM validation overrides
 above also apply to these recipes when full-canvas selection is desired.
+
+The matching smoke recipes are
+`just_grpo-math-llada8b-canvas256-2n8g-vllm-smoke.yaml` and
+`just_grpo-math-llada8b-canvas256-2n8g-vllm-smoke-diffaux.yaml`.
+They match the GSM8K vLLM smoke size: 2 nodes, 2 updates, 2 prompts × 16
+completions, and 16 validation questions per mode. Validation runs at the start
+and after each update with the same four greedy decoders and local accuracy/NFE
+artifacts. Checkpointing and W&B are disabled.
