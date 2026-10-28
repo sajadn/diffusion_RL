@@ -267,3 +267,11 @@ and ports, and sets a 0.001 generation-KL limit for smoke jobs only. Long recipe
 retain their disabled finite KL cutoff. Chain long continuation legs with Slurm
 `afterany`; each leg requires a finalized checkpoint and exits once 125 updates
 are complete.
+
+The campaign's `tools/math_code_vllm_20261028/promote.sbatch` can run on the CPU
+partition with `--dependency=afterany:<smoke-job-id>`, taking arguments
+`<smoke-job-id> <math|code> <plain|diffaux>`. It requires a successful smoke,
+two finite generation KL measurements below 0.001, and complete validation
+sweeps before submitting the matching 16-node long run. It records submission
+attempts to prevent duplicates and chains up to four four-hour allocations via
+`afterany`. Continuations require a finalized checkpoint and stop at 125 updates.
