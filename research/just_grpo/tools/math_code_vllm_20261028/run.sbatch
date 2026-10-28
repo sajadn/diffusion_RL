@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --nodes=2
+#SBATCH --mem=0
 #SBATCH --gpus-per-node=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=128
@@ -51,8 +52,8 @@ if step < 1:
 print(step)
 CHECKPOINT
   )
-  if (( step >= 125 )); then
-    echo "All 125 updates are complete."
+  if (( step >= 300 )); then
+    echo "All 300 updates are complete."
     exit 0
   fi
   test -s "$OUTPUT_DIR/wandb_url.txt"

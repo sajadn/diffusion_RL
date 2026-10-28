@@ -3,6 +3,7 @@
 defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long.yaml
 
 grpo:
+  max_num_steps: 300
   # Four batches cover all 500 questions, including the final short batch.
   max_val_samples: 512
 

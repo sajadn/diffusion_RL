@@ -204,7 +204,7 @@ completion diffusion loss (weight 0.1, masking 5%–100%). Set
 `LLADA_MATH_DATA_DIR` to the prepared MATH dataset directory containing
 `train.jsonl` and the 500-question `test.jsonl`, as for the existing MATH recipes.
 
-Both recipes keep the 16-node, 125-update setup and leftmost training rollouts at
+Both recipes keep the 16-node, 300-update setup and leftmost training rollouts at
 T=1. Validation runs at the start, every 10 updates, and at the end, covering all
 500 questions with T=0. The four modes are `fixed1_t0`, `threshold09_t0`,
 `threshold08_t0`, and `threshold07_t0`; the fixed-one mode remains the primary
@@ -235,7 +235,7 @@ The MBPP prompt, 500-task split (IDs 11–510), and grading programs follow that
 reference. Also set `JUSTGRPO_REFERENCE_DIR` and `POLICY_PYTHON` as for the existing
 AceCode/HumanEval recipes.
 
-The long recipes use 16 nodes, 125 updates, vLLM leftmost rollouts at T=1, and
+The long recipes use 16 nodes, 300 updates, vLLM leftmost rollouts at T=1, and
 a 4096-token context including the 256-token response canvas. The 3840-token
 prompt limit preserves the longest reference MBPP prompt (3837 tokens). Greedy validation
 runs on the live Megatron policy at the start, every 10 updates, and at the end.
@@ -265,7 +265,7 @@ The campaign launcher is `tools/math_code_vllm_20261028/run.sbatch` with argumen
 and long runs with 16. It reuses the provisioned GSM8K runtimes, isolates outputs
 and ports, and sets a 0.001 generation-KL limit for smoke jobs only. Long recipes
 retain their disabled finite KL cutoff. Chain long continuation legs with Slurm
-`afterany`; each leg requires a finalized checkpoint and exits once 125 updates
+`afterany`; each leg requires a finalized checkpoint and exits once 300 updates
 are complete.
 
 The campaign's `tools/math_code_vllm_20261028/promote.sbatch` can run on the CPU
@@ -273,5 +273,5 @@ partition with `--dependency=afterany:<smoke-job-id>`, taking arguments
 `<smoke-job-id> <math|code> <plain|diffaux>`. It requires a successful smoke,
 two finite generation KL measurements below 0.001, and complete validation
 sweeps before submitting the matching 16-node long run. It records submission
-attempts to prevent duplicates and chains up to four four-hour allocations via
-`afterany`. Continuations require a finalized checkpoint and stop at 125 updates.
+attempts to prevent duplicates and chains up to eight four-hour allocations via
+`afterany`. Continuations require a finalized checkpoint and stop at 300 updates.

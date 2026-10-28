@@ -40,6 +40,8 @@ def test_vllm_recipes_keep_greedy_validation_in_custom_adapter(
     recipe = Path(__file__).parents[2] / "configs/recipes" / f"{stem}{suffix}.yaml"
     config = load_config(recipe)
     diffusion = validate_config(config)
+    if dataset in ("math", "acecode") and not smoke:
+        assert config.grpo.max_num_steps == 300
     assert diffusion.runtime == "reference_vllm"
     assert diffusion.validation_runtime == "megatron_llada"
     assert (

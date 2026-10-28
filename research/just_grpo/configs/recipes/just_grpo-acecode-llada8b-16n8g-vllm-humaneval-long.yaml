@@ -3,6 +3,7 @@
 defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long.yaml
 
 grpo:
+  max_num_steps: 300
   num_updates_per_rollout: 1
   val_num_generations_per_prompt: 1
   # Per-benchmark budget: cover all 164 HumanEval and all 500 MBPP tasks.

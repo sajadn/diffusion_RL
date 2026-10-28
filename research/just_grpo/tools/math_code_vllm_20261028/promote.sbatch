@@ -55,13 +55,13 @@ print(max(candidates)[1])
 ACCOUNT
 )
 echo "Production account selected by current fairshare: $account"
-# Four allocations provide up to 16 hours. Each continuation checks the latest
-# finalized checkpoint and exits without starting training once step 125 exists.
+# Eight allocations provide up to 32 hours. Each continuation checks the latest
+# finalized checkpoint and exits without starting training once step 300 exists.
 previous=
-for leg in 0 1 2 3; do
+for leg in 0 1 2 3 4 5 6 7; do
   dependency=()
   if [[ -n "$previous" ]]; then dependency=(--dependency="afterany:$previous"); fi
-  cmd=(sbatch --parsable -A "$account" -p batch --nodes=16 --time=04:00:00
+  cmd=(sbatch --parsable -A "$account" -p batch --nodes=16 --mem=0 --time=04:00:00
     --job-name="llada_${task}_${variant}_long_20261028_leg${leg}"
     --output="$RUN_ROOT/${task}_${variant}-long-%j.out"
     "${dependency[@]}" "$tools/run.sbatch" long "$task" "$variant" "$leg")
