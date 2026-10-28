@@ -24,13 +24,44 @@ if [[ -s "$receipt" ]]; then
 fi
 "$POLICY_PYTHON" -I "$tools/check_smoke.py" \
   --job-id "$smoke_id" --output "$output" --task "$task" --kl-limit 0.001
+# Recheck eligible accounts when the smoke passes, rather than pinning fairshare.
+account=$("$POLICY_PYTHON" -I - <<'ACCOUNT'
+import getpass
+import math
+import subprocess
+user = getpass.getuser()
+associations = subprocess.check_output([
+    "sacctmgr", "-n", "-P", "show", "assoc", f"user={user}",
+    "format=Account,Partition",
+], text=True)
+eligible = set()
+for line in associations.splitlines():
+    name, partition, *_ = line.strip().split("|")
+    if partition in ("", "batch") and name != "coreai_dlalgo_modelopt":
+        eligible.add(name)
+shares = subprocess.check_output([
+    "sshare", "-U", "-n", "-P", "-o", "Account,User,FairShare",
+], text=True)
+candidates = []
+for line in shares.splitlines():
+    name, owner, score, *_ = [part.strip() for part in line.split("|")]
+    if owner == user and name in eligible and score:
+        value = float(score)
+        if math.isfinite(value):
+            candidates.append((value, name))
+if not candidates:
+    raise SystemExit("No eligible account with measured fairshare")
+print(max(candidates)[1])
+ACCOUNT
+)
+echo "Production account selected by current fairshare: $account"
 # Four allocations provide up to 16 hours. Each continuation checks the latest
 # finalized checkpoint and exits without starting training once step 125 exists.
 previous=
 for leg in 0 1 2 3; do
   dependency=()
   if [[ -n "$previous" ]]; then dependency=(--dependency="afterany:$previous"); fi
-  cmd=(sbatch --parsable -A coreai_dlalgo_llm -p batch --nodes=16 --time=04:00:00
+  cmd=(sbatch --parsable -A "$account" -p batch --nodes=16 --time=04:00:00
     --job-name="llada_${task}_${variant}_long_20261028_leg${leg}"
     --output="$RUN_ROOT/${task}_${variant}-long-%j.out"
     "${dependency[@]}" "$tools/run.sbatch" long "$task" "$variant" "$leg")
