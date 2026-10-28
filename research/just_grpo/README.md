@@ -190,3 +190,21 @@ For LLaDA vLLM training, `just_grpo.validation_runtime` selects validation:
 The current vLLM LLaDA implementation selects across one full canvas, so validation `block_size` must equal `policy.generation.max_new_tokens`. For the 256-token GSM8K recipes, set both `just_grpo.validation_sampling.block_size=256` and `just_grpo.validation_sampling.max_steps=256`; the named modes inherit these values. The opt-in recipe `just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-fullcanvas-val-long.yaml` sets all three overrides. Apply the same overrides to the diffusion-auxiliary recipe to retain its loss configuration.
 
 Full-canvas confidence selection differs from 32-token-block selection; accuracy and NFE are not an identical-decoder comparison. Both validation backends retain the training-step accuracy–NFE plot. Each vLLM mode owns an engine and refit namespace; only one generation group is awake at a time, but startup and host-memory use increase with the number of modes.
+
+
+## MATH-500 greedy validation with vLLM rollouts
+
+Use `configs/recipes/just_grpo-math-llada8b-canvas256-16n8g-vllm-long.yaml`
+for plain JustGRPO, or the sibling `-long-diffaux.yaml` recipe for the positive
+completion diffusion loss (weight 0.1, masking 5%–100%). Set
+`LLADA_MATH_DATA_DIR` to the prepared MATH dataset directory containing
+`train.jsonl` and the 500-question `test.jsonl`, as for the existing MATH recipes.
+
+Both recipes keep the 16-node, 125-update setup and leftmost training rollouts at
+T=1. Validation runs at the start, every 10 updates, and at the end, covering all
+500 questions with T=0. The four modes are `fixed1_t0`, `threshold09_t0`,
+`threshold08_t0`, and `threshold07_t0`; the fixed-one mode remains the primary
+checkpoint metric. They retain the accuracy-versus-NFE plots and training-step
+history. Validation uses the live Megatron policy with 32-token selection blocks
+within the 256-token bidirectional canvas. The optional vLLM validation overrides
+above also apply to these recipes when full-canvas selection is desired.

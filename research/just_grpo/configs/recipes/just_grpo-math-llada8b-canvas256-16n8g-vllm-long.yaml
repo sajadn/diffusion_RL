@@ -1,0 +1,109 @@
+# MATH training / MATH-500 validation; vLLM full-canvas LLaDA rollouts.
+# Greedy validation retains the four-point accuracy/NFE sweep on live Megatron.
+defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long.yaml
+
+grpo:
+  # Four batches cover all 500 questions, including the final short batch.
+  max_val_samples: 512
+
+just_grpo:
+  # Replace the inherited T=1 mode names as well as their temperatures.
+  _override_: true
+  distributed: true
+  runtime: reference_vllm
+  validation_runtime: megatron_llada
+  generation_python: null
+  max_generation_kl: .inf
+  generation_batch_size: 4
+  training_token_fraction: 1.0
+  schedule:
+    mask_token_id: 126336
+    block_size: 256
+    reveal_tokens_per_step: 1
+  sampling:
+    temperature: 1.0
+    block_size: ${just_grpo.schedule.block_size}
+    max_steps: ${just_grpo.schedule.block_size}
+    selection_policy: leftmost
+    threshold: 0.9
+    returns_reveal_steps: false
+    returns_entropy: false
+  validation_sampling:
+    temperature: 0.0
+    block_size: 32
+    max_steps: 32
+    selection_policy: low_confidence
+    threshold: 0.9
+    returns_reveal_steps: false
+    returns_entropy: false
+  # First mode supplies primary accuracy and checkpoint ranking.
+  validation_modes:
+    fixed1_t0: ${just_grpo.validation_sampling}
+    threshold09_t0:
+      temperature: ${just_grpo.validation_sampling.temperature}
+      block_size: ${just_grpo.validation_sampling.block_size}
+      max_steps: ${just_grpo.validation_sampling.max_steps}
+      selection_policy: confidence_threshold
+      threshold: 0.9
+      returns_reveal_steps: false
+      returns_entropy: false
+    threshold08_t0:
+      temperature: ${just_grpo.validation_sampling.temperature}
+      block_size: ${just_grpo.validation_sampling.block_size}
+      max_steps: ${just_grpo.validation_sampling.max_steps}
+      selection_policy: confidence_threshold
+      threshold: 0.8
+      returns_reveal_steps: false
+      returns_entropy: false
+    threshold07_t0:
+      temperature: ${just_grpo.validation_sampling.temperature}
+      block_size: ${just_grpo.validation_sampling.block_size}
+      max_steps: ${just_grpo.validation_sampling.max_steps}
+      selection_policy: confidence_threshold
+      threshold: 0.7
+      returns_reveal_steps: false
+      returns_entropy: false
+
+policy:
+  # Match the existing MATH recipe's prompt budget; retain all 500 questions.
+  max_total_sequence_length: 1280
+  generation:
+    val_temperature: ${just_grpo.validation_sampling.temperature}
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+    vllm_kwargs:
+      # Four complete prompt+canvas requests must fit the scheduling budget.
+      max_num_batched_tokens: 5120
+
+data:
+  _override_: true
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  max_input_seq_length: 1024
+  train:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:LLADA_MATH_DATA_DIR}/train.jsonl
+    input_key: problem
+    output_key: answer
+    split: train
+  validation:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:LLADA_MATH_DATA_DIR}/test.jsonl
+    input_key: problem
+    output_key: answer
+    split: train
+  default:
+    prompt_file: research/just_grpo/configs/prompts/passthrough.txt
+    system_prompt_file: null
+    processor: math_hf_data_processor
+    env_name: math
+
+checkpointing:
+  save_period: 10
+  ft_save_period: 1
+
+logger:
+  log_dir: ${oc.env:LOG_DIR,logs/llada_math_canvas256_vllm_greedy}
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,llada_math_canvas256_vllm_greedy}
