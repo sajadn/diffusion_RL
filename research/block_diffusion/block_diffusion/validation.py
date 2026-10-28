@@ -36,9 +36,10 @@ def validate_experiment(
         raise ValueError("Multi-mode validation requires reference_vllm generation")
     g, p, loss = config.grpo, config.policy, config.loss_fn
     # LLaDA replays its full canvas whichever engine generated it.
-    llada_worker = p.worker_extension_cls_fqn == (
-        "just_grpo.algorithms.llada_policy_worker.LLaDAJustGRPOPolicyWorker"
-    )
+    llada_worker = p.worker_extension_cls_fqn in {
+        "just_grpo.algorithms.llada_policy_worker.LLaDAJustGRPOPolicyWorker",
+        "fork_grpo.llada_policy_worker.LLaDAForkGRPOPolicyWorker",
+    }
     if p.get("diffusion_aux_loss") is not None:
         resolve_positive_diffusion_config(
             OmegaConf.to_container(p.diffusion_aux_loss, resolve=True),

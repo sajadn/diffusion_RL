@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 export RUN_ROOT=/lustre/fsw/portfolios/coreai/users/snorouzi/runs/diffusion_rl/llada_gsm8k_vllm_20261027
-export REPO_DIR=/lustre/fsw/portfolios/coreai/users/snorouzi/runs/diffusion_rl/llada_gsm8k_vllm_20261027/source
+export REPO_DIR=/lustre/fsw/portfolios/coreai/users/snorouzi/RL-Rebase/RL-research
 export POLICY_PYTHON=/lustre/fsw/portfolios/coreai/users/snorouzi/nemorl_uv_driver_envs/diffusion_RL_RL_mb_3rdparty_sglagn_local_fork/bin/python
 export MODEL=/lustre/fsw/portfolios/coreai/users/snorouzi/hf_home/hub/models--GSAI-ML--LLaDA-8B-Instruct/snapshots/08b83a6feb34df1a6011b80c3c00c7563e963b07
 export CONTAINER_IMAGE=/lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_llm/users/sfawzy/nemo-rl-nightly.sqsh

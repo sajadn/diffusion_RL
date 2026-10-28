@@ -188,8 +188,14 @@ def llada_vllm_validation_variants(
             )
         if not 1 <= params.max_steps <= canvas or canvas % params.max_steps:
             raise ValueError("Validation max_steps must divide the full canvas length")
-        if params.selection_policy not in ("low_confidence", "confidence_threshold"):
-            raise ValueError("vLLM LLaDA validation requires confidence unmasking")
+        if params.selection_policy not in (
+            "leftmost",
+            "low_confidence",
+            "confidence_threshold",
+        ):
+            raise ValueError(
+                "vLLM LLaDA validation requires leftmost or confidence unmasking"
+            )
         if (
             params.selection_policy == "confidence_threshold"
             and params.max_steps != canvas

@@ -112,7 +112,7 @@ def validate_llada(
         points = [
             SweepPoint(
                 params["threshold"]
-                if params["selection_policy"] == "confidence_threshold"
+                if params["selection_policy"] in ("confidence_threshold", "fork")
                 else None,
                 metrics[f"mean_forward_passes/{name}"],
                 metrics[f"accuracy/{name}"],

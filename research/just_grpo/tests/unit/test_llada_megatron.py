@@ -425,8 +425,9 @@ def test_recipes_validate_four_decoders(monkeypatch, auxiliary, smoke, dataset):
 
 @pytest.mark.parametrize("fail_second", [False, True])
 @pytest.mark.parametrize("with_logger", [False, True])
+@pytest.mark.parametrize("selection_policy", ["confidence_threshold", "fork"])
 def test_named_validation_replays_data_restores_decoder_and_plots(
-    monkeypatch, tmp_path, fail_second, with_logger
+    monkeypatch, tmp_path, fail_second, with_logger, selection_policy
 ):
     import json
     import sys
@@ -468,7 +469,7 @@ def test_named_validation_replays_data_restores_decoder_and_plots(
                 name: {
                     "selection_policy": "low_confidence"
                     if i == 0
-                    else "confidence_threshold",
+                    else selection_policy,
                     "threshold": 1.0 - i / 10,
                 }
                 for i, name in enumerate(modes)

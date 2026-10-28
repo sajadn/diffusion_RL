@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=128
 #SBATCH --time=04:00:00
 set -euo pipefail
-source /lustre/fsw/portfolios/coreai/users/snorouzi/runs/diffusion_rl/llada_gsm8k_vllm_20261027/env.sh
+source /lustre/fsw/portfolios/coreai/users/snorouzi/RL-Rebase/RL-research/research/just_grpo/tools/gsm8k_vllm_20261027/env.sh
 variant=${1:?plain, diffaux, or smoke}
 case "$variant" in
   plain) recipe=just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long ;;

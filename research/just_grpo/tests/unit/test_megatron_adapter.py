@@ -748,3 +748,30 @@ def test_causal_auxiliary_processor_matches_manual_losses(temperature):
     torch.testing.assert_close(
         seen["policy_logits"], logits[:, :noisy_width].float() / temperature
     )
+
+
+@pytest.mark.parametrize(
+    "backend,validation_mode,validation_runtime,error",
+    [
+        ("vllm", False, "megatron_llada", "Megatron backend"),
+        ("vllm", True, "generation", "Megatron backend"),
+        ("vllm", True, "megatron_llada", "TP=1"),
+        ("megatron", False, None, "TP=1"),
+    ],
+)
+def test_llada_generation_guard_uses_shared_diffusion_config(
+    monkeypatch, backend, validation_mode, validation_runtime, error
+):
+    from types import SimpleNamespace
+    from just_grpo.algorithms.llada_policy_worker import LLaDAJustGRPOPolicyWorkerImpl
+
+    worker = object.__new__(LLaDAJustGRPOPolicyWorkerImpl)
+    worker.cfg = {"generation": {"backend": backend}}
+    worker.validation_mode = validation_mode
+    worker.diffusion = SimpleNamespace(validation_runtime=validation_runtime)
+    # Stop after backend selection, before CUDA or model execution.
+    monkeypatch.setattr(
+        parallel_state, "get_tensor_model_parallel_world_size", lambda: 2
+    )
+    with pytest.raises(ValueError, match=error):
+        worker.generate(data=None)

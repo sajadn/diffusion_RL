@@ -238,3 +238,9 @@ def test_vllm_llada_requires_complete_canvas(stop_early):
         parsed = validate_config(config)
         assert parsed.runtime == "reference_vllm"
         assert parsed.max_generation_kl == 0.001
+        from just_grpo.config import llada_vllm_validation_variants
+
+        variants = llada_vllm_validation_variants(config, parsed)
+        decoding = variants["validation"]["vllm_kwargs"]["diffusion_config"]
+        assert decoding["selection_policy"] == "leftmost"
+        assert decoding["max_denoising_steps"] == decoding["canvas_length"]
