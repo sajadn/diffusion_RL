@@ -16,7 +16,7 @@ esac
 export OUTPUT_DIR="$RUN_ROOT/$variant" LOG_DIR="$RUN_ROOT/$variant"
 export CHECKPOINT_ROOT="$OUTPUT_DIR/checkpoints"
 export CONFIG="$REPO_DIR/research/just_grpo/configs/recipes/$recipe.yaml"
-export WANDB_RUN_NAME="llada_gsm8k_canvas256_${variant}_vllm_20261027"
+export WANDB_RUN_NAME="llada_gsm8k_canvas256_${variant}_vllm_20261027_stepfix"
 port_base=$((18000 + SLURM_JOB_ID % 1000 * 20))
 export PORT=$port_base RAY_CLIENT_SERVER_PORT=$((port_base+1)) DASHBOARD_PORT=$((port_base+2))
 export NODE_MANAGER_PORT=$((port_base+3)) OBJECT_MANAGER_PORT=$((port_base+5))

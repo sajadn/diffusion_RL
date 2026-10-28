@@ -463,7 +463,17 @@ def test_named_validation_replays_data_restores_decoder_and_plots(
         sys.modules, "nemo_rl.algorithms.grpo", SimpleNamespace(validate=validate)
     )
     master = SimpleNamespace(
-        just_grpo={"validation_modes": dict.fromkeys(modes, {})},
+        just_grpo={
+            "validation_modes": {
+                name: {
+                    "selection_policy": "low_confidence"
+                    if i == 0
+                    else "confidence_threshold",
+                    "threshold": 1.0 - i / 10,
+                }
+                for i, name in enumerate(modes)
+            }
+        },
         policy={"generation": {"max_new_tokens": 256}},
         logger={"log_dir": str(tmp_path)},
     )
@@ -487,7 +497,16 @@ def test_named_validation_replays_data_restores_decoder_and_plots(
             assert metrics[f"accuracy/{name}"] == accuracies[index]
             assert metrics[f"mean_forward_passes/{name}"] == nfe
             assert metrics[f"tokens_per_forward/{name}"] == 256 / nfe
-            expected_rows.append([name, nfe, accuracies[index]])
+            expected_rows.append(
+                [
+                    10,
+                    name,
+                    None if index == 0 else 1.0 - index / 10,
+                    nfe,
+                    accuracies[index],
+                    2,
+                ]
+            )
             suffix = f"_{name}" if index else ""
             saved = json.loads(
                 (tmp_path / f"decode_stats_step10{suffix}.json").read_text()
@@ -496,17 +515,25 @@ def test_named_validation_replays_data_restores_decoder_and_plots(
         assert plot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         if logger is not None:
             logger.log_table.assert_called_once_with(
-                ["mode", "nfe", "accuracy"],
+                [
+                    "training_step",
+                    "variant",
+                    "confidence_threshold",
+                    "mean_denoising_nfe",
+                    "accuracy",
+                    "num_samples",
+                ],
                 expected_rows,
                 10,
                 "validation/accuracy_vs_nfe_data",
             )
             figure, step, name = logger.log_plot.call_args.args
             assert (step, name) == (10, "validation/accuracy_vs_nfe")
-            assert [
-                points.get_offsets().tolist()[0]
-                for points in figure.axes[0].collections
-            ] == [row[1:] for row in expected_rows]
+            line = figure.axes[0].lines[0]
+            ordered = sorted(expected_rows, key=lambda row: row[3])
+            assert list(line.get_xdata()) == [row[3] for row in ordered]
+            assert list(line.get_ydata()) == [100 * row[4] for row in ordered]
+            assert figure.axes[0].get_ylabel() == "Accuracy (%)"
             assert [
                 c.args[1] for c in logger.log_batched_dict_as_jsonl.call_args_list
             ] == [
@@ -564,6 +591,8 @@ def test_vllm_gsm8k_preserves_megatron_validation(auxiliary):
     diffusion = validate_config(config)
     assert diffusion.runtime == "reference_vllm"
     assert diffusion.validation_runtime == "megatron_llada"
+    assert diffusion.max_generation_kl == float("inf")
+    assert config.logger.wandb.training_step_history is True
     assert len(diffusion.validation_modes) == 4
     assert config.policy.train_global_batch_size == 1024
     assert bool(config.policy.get("diffusion_aux_loss")) is auxiliary

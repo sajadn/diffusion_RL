@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from matplotlib.figure import Figure
+from block_diffusion.generation.confidence_sweep import SweepPoint, make_figure
 
 
 if TYPE_CHECKING:
@@ -80,6 +80,7 @@ def validate_llada(
             counts = policy_generation.forward_counts
             if not counts:
                 raise RuntimeError("LLaDA validation produced no decoding statistics")
+            values["num_samples"] = len(counts)
             values["mean_forward_passes"] = sum(counts) / len(counts)
             values["max_forward_passes"] = max(counts)
             values["min_forward_passes"] = min(counts)
@@ -108,25 +109,45 @@ def validate_llada(
             val_dataloader.load_state_dict(loader_state)
     if modes:
         # Plot only complete comparisons, after restoring the training decoder/data.
-        rows = [
-            [name, metrics[f"mean_forward_passes/{name}"], metrics[f"accuracy/{name}"]]
-            for name in modes
+        points = [
+            SweepPoint(
+                params["threshold"]
+                if params["selection_policy"] == "confidence_threshold"
+                else None,
+                metrics[f"mean_forward_passes/{name}"],
+                metrics[f"accuracy/{name}"],
+                metrics[f"num_samples/{name}"],
+                name,
+            )
+            for name, params in modes.items()
         ]
-        figure = Figure(figsize=(7, 4.5), layout="constrained")
-        axes = figure.subplots()
-        for name, nfe, accuracy in rows:
-            axes.scatter(nfe, accuracy, label=name)
-        axes.set_xlabel("NFE per response (mean forward passes)")
-        axes.set_ylabel("Validation accuracy")
-        axes.set_ylim(0, 1)
-        axes.set_title(f"Accuracy vs. NFE — step {step}")
-        axes.grid(alpha=0.25)
-        axes.legend()
-        figure.savefig(output / f"accuracy_vs_nfe_step{step}.png", dpi=160)
+        figure = make_figure(
+            {"Current policy": points},
+            step=step,
+            nfe_description="NFE counts full-canvas model forward passes.",
+        )
+        figure.savefig(output / f"accuracy_vs_nfe_step{step}.png", dpi=160, bbox_inches="tight")
         if logger is not None:
             logger.log_table(
-                ["mode", "nfe", "accuracy"],
-                rows,
+                [
+                    "training_step",
+                    "variant",
+                    "confidence_threshold",
+                    "mean_denoising_nfe",
+                    "accuracy",
+                    "num_samples",
+                ],
+                [
+                    [
+                        step,
+                        p.variant,
+                        p.threshold,
+                        p.mean_nfe,
+                        p.accuracy,
+                        p.num_samples,
+                    ]
+                    for p in points
+                ],
                 step,
                 "validation/accuracy_vs_nfe_data",
             )

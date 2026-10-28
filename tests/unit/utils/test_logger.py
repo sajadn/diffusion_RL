@@ -544,6 +544,41 @@ class TestWandbLogger:
         assert all("step" not in kwargs for _, kwargs in mock_run.log.call_args_list)
 
     @patch("nemo_rl.utils.logger.wandb")
+    def test_training_step_history_isolates_telemetry_and_preserves_media(
+        self, mock_wandb
+    ):
+        main, telemetry = MagicMock(), MagicMock()
+        main.id, main.name = "run1", "training"
+        mock_wandb.init.side_effect = [main, telemetry]
+        logger = WandbLogger({"training_step_history": True})
+        mock_wandb.init.assert_called_once_with(dir=None)
+        logger.log_plot("figure0", 0, "validation/accuracy_vs_nfe")
+        logger.log_metrics({"loss": 1.0}, 0, step_finished=True)
+        for tick in range(3):
+            logger.log_metrics(
+                {"wall_time": tick, "gpu": tick}, 0, step_metric="wall_time"
+            )
+        # A second flush at the same iteration must append to its open row.
+        logger.log_table(["value"], [[1]], 0, "validation/table")
+        logger.log_plot("figure10", 10, "validation/accuracy_vs_nfe")
+        logger.log_metrics({"loss": 0.5}, 10, step_finished=True)
+        logger.finish()
+        assert [c.kwargs["step"] for c in main.log.call_args_list] == [0, 0, 10]
+        assert all(c.kwargs["commit"] is False for c in main.log.call_args_list)
+        assert (
+            main.log.call_args_list[0].args[0]["validation/accuracy_vs_nfe"]
+            == "figure0"
+        )
+        assert (
+            main.log.call_args_list[-1].args[0]["validation/accuracy_vs_nfe"]
+            == "figure10"
+        )
+        assert telemetry.log.call_count == 3
+        assert mock_wandb.init.call_args.kwargs["id"] == "run1-telemetry"
+        main.finish.assert_called_once()
+        telemetry.finish.assert_called_once()
+
+    @patch("nemo_rl.utils.logger.wandb")
     def test_define_metric(self, mock_wandb):
         """Test defining a metric with a custom step metric."""
         cfg = {}

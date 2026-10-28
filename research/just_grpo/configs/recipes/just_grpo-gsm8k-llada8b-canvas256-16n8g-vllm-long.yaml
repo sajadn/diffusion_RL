@@ -4,7 +4,7 @@ defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-megatron-inference-long.yaml
 just_grpo:
   runtime: reference_vllm
   validation_runtime: megatron_llada
-  max_generation_kl: 0.001
+  max_generation_kl: .inf
 
 policy:
   generation:
@@ -30,3 +30,7 @@ policy:
         confidence_threshold: ${just_grpo.sampling.threshold}
         return_entropy: ${just_grpo.sampling.returns_entropy}
         return_reveal_steps: ${just_grpo.sampling.returns_reveal_steps}
+
+logger:
+  wandb:
+    training_step_history: true

@@ -68,6 +68,9 @@ class WandbConfig(TypedDict):
     # Log complete NeMo Gym result payloads as W&B Tables. These payloads can be
     # very large, so the recommended default is false.
     log_nemo_gym_full_result_tables: NotRequired[bool]
+    # Opt in to training-iteration media sliders. Independent telemetry goes
+    # to a linked companion run; absent/false preserves the existing history.
+    training_step_history: NotRequired[bool]
 
 
 class SwanlabConfig(TypedDict):
@@ -245,6 +248,10 @@ class WandbLogger(LoggerInterface):
         # NeMo RL logging controls are not valid wandb.init keyword arguments.
         wandb_init_config = dict(cfg)
         wandb_init_config.pop("log_nemo_gym_full_result_tables", None)
+        self._training_step_history = bool(
+            wandb_init_config.pop("training_step_history", None)
+        )
+        self._telemetry_run = None
         self.run = wandb.init(**wandb_init_config, dir=log_dir)
         self._log_lock = threading.Lock()
         self._metric_step_patterns: dict[str, Optional[str]] = {}
@@ -510,7 +517,13 @@ class WandbLogger(LoggerInterface):
             return
         event_metrics = dict(self._pending_metrics)
         event_metrics[WANDB_CALLER_STEP_METRIC] = self._pending_step
-        self.run.log(event_metrics)
+        if self._training_step_history:
+            # Keep the W&B row open: validation and final metrics may flush
+            # separately at the same iteration. Advancing the step (or finish)
+            # commits the row without losing late metrics for that iteration.
+            self.run.log(event_metrics, step=self._pending_step, commit=False)
+        else:
+            self.run.log(event_metrics)
         self._pending_step = None
         self._pending_metrics = {}
 
@@ -567,13 +580,33 @@ class WandbLogger(LoggerInterface):
                         f"Custom W&B step metric {event_step_metric!r} is missing "
                         "from the logged event"
                     )
-                self._define_event_metrics_locked(
-                    metrics,
-                    step_metric=event_step_metric,
-                )
-                # Custom-axis streams (rollout telemetry, GPU monitoring) are
-                # independent events and must not carry nemo_rl/step.
-                self.run.log(dict(metrics))
+                if self._training_step_history:
+                    if self._telemetry_run is None:
+                        self._telemetry_run = wandb.init(
+                            entity=self.run.entity,
+                            project=self.run.project,
+                            id=f"{self.run.id}-telemetry",
+                            name=f"{self.run.name} / telemetry",
+                            job_type="telemetry",
+                            resume="allow",
+                            reinit="create_new",
+                            config={"training_run": self.run.url},
+                            dir=self.run.dir,
+                        )
+                        self.run.summary["telemetry_run"] = self._telemetry_run.url
+                    self._telemetry_run.define_metric(event_step_metric, hidden=True)
+                    for name in metrics:
+                        if name != event_step_metric:
+                            self._telemetry_run.define_metric(
+                                name, step_metric=event_step_metric
+                            )
+                    self._telemetry_run.log(dict(metrics))
+                else:
+                    self._define_event_metrics_locked(
+                        metrics, step_metric=event_step_metric
+                    )
+                    # Independent events must not carry nemo_rl/step.
+                    self.run.log(dict(metrics))
                 return
 
             self._buffer_step_metrics_locked(
@@ -634,6 +667,9 @@ class WandbLogger(LoggerInterface):
                 self._flush_pending_metrics_locked()
                 self.run.finish()
                 self.run = None
+            if self._telemetry_run is not None:
+                self._telemetry_run.finish()
+                self._telemetry_run = None
 
     def log_histogram(self, histogram: list[Any], step: int, name: str) -> None:
         """Log histogram metrics to wandb.
