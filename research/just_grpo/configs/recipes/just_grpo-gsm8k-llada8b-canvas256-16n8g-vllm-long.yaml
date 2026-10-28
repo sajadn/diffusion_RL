@@ -1,13 +1,68 @@
-# vLLM full-canvas rollouts with the reference Megatron validation decoders.
+# vLLM full-canvas rollouts with greedy Megatron validation and an accuracy/NFE sweep.
 defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-megatron-inference-long.yaml
 
 just_grpo:
+  # Replace the inherited T=1 mode names as well as their temperatures.
+  _override_: true
+  distributed: true
   runtime: reference_vllm
   validation_runtime: megatron_llada
+  generation_python: null
   max_generation_kl: .inf
+  generation_batch_size: 4
+  training_token_fraction: 1.0
+  schedule:
+    mask_token_id: 126336
+    block_size: 256
+    reveal_tokens_per_step: 1
+  sampling:
+    temperature: 1.0
+    block_size: ${just_grpo.schedule.block_size}
+    max_steps: ${just_grpo.schedule.block_size}
+    selection_policy: leftmost
+    threshold: 0.9
+    returns_reveal_steps: false
+    returns_entropy: false
+  validation_sampling:
+    temperature: 0.0
+    block_size: 32
+    max_steps: 32
+    selection_policy: low_confidence
+    threshold: 0.9
+    returns_reveal_steps: false
+    returns_entropy: false
+  # First mode supplies primary accuracy and checkpoint ranking.
+  validation_modes:
+    fixed1_t0: ${just_grpo.validation_sampling}
+    threshold09_t0:
+      temperature: ${just_grpo.validation_sampling.temperature}
+      block_size: ${just_grpo.validation_sampling.block_size}
+      max_steps: ${just_grpo.validation_sampling.max_steps}
+      selection_policy: confidence_threshold
+      threshold: 0.9
+      returns_reveal_steps: false
+      returns_entropy: false
+    threshold08_t0:
+      temperature: ${just_grpo.validation_sampling.temperature}
+      block_size: ${just_grpo.validation_sampling.block_size}
+      max_steps: ${just_grpo.validation_sampling.max_steps}
+      selection_policy: confidence_threshold
+      threshold: 0.8
+      returns_reveal_steps: false
+      returns_entropy: false
+    threshold07_t0:
+      temperature: ${just_grpo.validation_sampling.temperature}
+      block_size: ${just_grpo.validation_sampling.block_size}
+      max_steps: ${just_grpo.validation_sampling.max_steps}
+      selection_policy: confidence_threshold
+      threshold: 0.7
+      returns_reveal_steps: false
+      returns_entropy: false
+
 
 policy:
   generation:
+    val_temperature: ${just_grpo.validation_sampling.temperature}
     backend: vllm
     refit_transport: null
     worker_extension_cls_fqn: block_diffusion.generation.reference_vllm.ReferenceVllmWorker

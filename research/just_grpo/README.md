@@ -182,6 +182,10 @@ legacy GRPO controllers for this recipe and SingleController for configs with
 
 ## Optional LLaDA validation backend
 
+The GSM8K vLLM long, diffusion-auxiliary, smoke, and full-canvas-validation
+recipes use T=1 for training and T=0 for validation. Their accuracy/NFE sweep
+uses `fixed1_t0`, `threshold09_t0`, `threshold08_t0`, and `threshold07_t0`.
+
 For LLaDA vLLM training, `just_grpo.validation_runtime` selects validation:
 
 - `megatron_llada`: use the live training policy. This remains the GSM8K recipe default and supports the existing 32-token selection blocks within a 256-token attention canvas.
