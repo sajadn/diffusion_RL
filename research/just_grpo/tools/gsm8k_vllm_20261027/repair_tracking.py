@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 
+import matplotlib.pyplot  # noqa: F401 - required by W&B figure conversion
 import wandb
 from tensorboard.backend.event_processing.event_file_loader import LegacyEventFileLoader
 from tensorboard.util import tensor_util
@@ -114,12 +115,25 @@ def publish(variant, rows, points, receipt, output):
     config["just_grpo"]["max_generation_kl"] = float("inf")
     config["logger"]["wandb"]["training_step_history"] = True
     config["history_repaired_from"] = receipt["old_run"]
+    previous = output / "publishing.json"
+    completed_steps = set()
+    if previous.exists():
+        prior = json.loads(previous.read_text())
+        assert prior["old_run"] == receipt["old_run"]
+        run_id = prior["new_run"].rsplit("/", 1)[-1]
+        resumed = wandb.Api().run(prior["new_run"].removeprefix("https://wandb.ai/"))
+        completed_steps = {
+            int(row["nemo_rl/step"])
+            for row in resumed.scan_history(keys=["_step", "nemo_rl/step"])
+        }
+    else:
+        run_id = wandb.util.generate_id()
     run = wandb.init(
         entity=old.entity,
         project=old.project,
-        id=wandb.util.generate_id(),
+        id=run_id,
         name=old.name + "_stepfix",
-        resume="never",
+        resume="must" if previous.exists() else "never",
         config=config,
         dir=str(output),
         tags=["training-step-history", "kl-limit-disabled"],
@@ -132,6 +146,8 @@ def publish(variant, rows, points, receipt, output):
     for name in ("validation/accuracy_vs_nfe", "validation/accuracy_vs_nfe_data"):
         run.define_metric(name, step_metric="nemo_rl/step")
     for step, metrics in sorted(rows.items()):
+        if step in completed_steps:
+            continue
         payload = {**metrics, "nemo_rl/step": step}
         if step in points:
             payload["validation/accuracy_vs_nfe"] = make_figure(
