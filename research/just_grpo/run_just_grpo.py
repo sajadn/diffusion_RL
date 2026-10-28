@@ -19,7 +19,7 @@ from pathlib import Path
 
 from block_diffusion import training
 from just_grpo.algorithms.llada_schedule import make_llada_training_data_preparer
-from just_grpo.config import validate_config
+from just_grpo.config import llada_vllm_validation_variants, validate_config
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_rl.utils.config import (
@@ -58,6 +58,10 @@ def run(config: DictConfig, *, evaluation_only: bool = False) -> None:
     ):
         from just_grpo.generation.llada_generation import make_llada_policy_validator
 
+        if diffusion.validation_runtime == "generation":
+            config.policy.generation.vllm_val_dllm_variants = (
+                llada_vllm_validation_variants(config, diffusion)
+            )
         # LLaDA replays on its full canvas whichever engine generated it.
         training.run(
             config,

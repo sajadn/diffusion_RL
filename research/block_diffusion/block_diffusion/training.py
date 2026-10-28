@@ -196,11 +196,12 @@ def run(
         if validation_fn_factory is not None:
             validation_fn = validation_fn_factory(policy=policy, config=master)
         if evaluation_only:
-            if validation_fn is None:
+            validator = validation if validation is not None else validation_fn
+            if validator is None:
                 raise ValueError("Evaluation-only execution requires a validator")
             generation.prepare_for_generation()
             try:
-                metrics, timings = validation_fn(
+                metrics, timings = validator(
                     generation,
                     val_dataloader,
                     tokenizer,

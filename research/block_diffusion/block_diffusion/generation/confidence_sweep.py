@@ -16,6 +16,8 @@
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -126,3 +128,38 @@ def make_figure(
         fontsize=8,
     )
     return figure
+
+
+def log_sweep(
+    points: Sequence[SweepPoint],
+    *,
+    step: int,
+    output: Path,
+    logger: Any,
+    nfe_description: str,
+) -> None:
+    """Save a measured comparison and publish it at the trainer's global step."""
+    figure = make_figure(
+        {"Current policy": points}, step=step, nfe_description=nfe_description
+    )
+    figure.savefig(
+        output / f"accuracy_vs_nfe_step{step}.png", dpi=160, bbox_inches="tight"
+    )
+    if logger is not None:
+        logger.log_table(
+            [
+                "training_step",
+                "variant",
+                "confidence_threshold",
+                "mean_denoising_nfe",
+                "accuracy",
+                "num_samples",
+            ],
+            [
+                [step, p.variant, p.threshold, p.mean_nfe, p.accuracy, p.num_samples]
+                for p in points
+            ],
+            step,
+            "validation/accuracy_vs_nfe_data",
+        )
+        logger.log_plot(figure, step, "validation/accuracy_vs_nfe")

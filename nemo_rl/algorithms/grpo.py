@@ -4325,6 +4325,7 @@ def validate(
 
         val_metrics = {
             "accuracy": accuracy,
+            "num_samples": num_samples,
             "avg_length": avg_length,
             **additional_metrics_to_report,
         }

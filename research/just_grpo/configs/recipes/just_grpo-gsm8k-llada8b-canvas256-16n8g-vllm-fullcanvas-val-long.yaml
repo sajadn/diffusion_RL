@@ -1,0 +1,9 @@
+# Optional vLLM validation: confidence selection across the full 256-token canvas.
+# This differs from the Megatron recipe's 32-token selection blocks.
+defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long.yaml
+
+just_grpo:
+  validation_runtime: generation
+  validation_sampling:
+    block_size: ${just_grpo.schedule.block_size}
+    max_steps: ${just_grpo.schedule.block_size}

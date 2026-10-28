@@ -147,11 +147,22 @@ def test_validation_refits_honor_buffer_size(monkeypatch, buffer_size_gb):
 
 @pytest.mark.parametrize("fail_mode", [None, "diffusion_conf09", "ar"])
 @pytest.mark.parametrize("colocated", [True, False])
+@pytest.mark.parametrize("llada", [False, True])
 def test_modes_refit_same_weights_and_prompts_and_restore_on_error(
-    monkeypatch, fail_mode, colocated
+    monkeypatch, fail_mode, colocated, llada, tmp_path
 ):
     events = []
-    runner = MultiModeValidation(validation_variants(variants()), colocated=colocated)
+    raw = variants()
+    if llada:
+        raw["vllm_val_dllm_variants"] = {
+            "diffusion_conf09": raw["vllm_val_dllm_variants"]["diffusion_conf09"]
+        }
+        raw["vllm_val_dllm_variants"]["diffusion_conf09"]["vllm_kwargs"][
+            "hf_overrides"
+        ] = {"architectures": ["LLaDAModelLM"]}
+        if fail_mode == "ar":
+            pytest.skip("LLaDA has no causal-AR variant")
+    runner = MultiModeValidation(validation_variants(raw), colocated=colocated)
     runner.policy = Mock()
     runner.policy.prepare_for_lp_inference.side_effect = lambda: events.append("onload")
     runner.policy.offload_after_refit.side_effect = lambda: events.append("offload")
@@ -162,7 +173,8 @@ def test_modes_refit_same_weights_and_prompts_and_restore_on_error(
         group = Mock(cfg={"name": name})
         group.get_step_metrics.return_value = (
             {"vllm/denoising_nfe": 12.0, "vllm/tokens_per_denoising_nfe": 4.0}
-            if name == "diffusion_conf09" else {}
+            if name == "diffusion_conf09"
+            else {}
         )
         group.sleep.side_effect = lambda n=name: events.append(f"sleep {n}") or True
         group.wake_up.side_effect = lambda n=name: events.append(f"wake {n}") or True
@@ -179,6 +191,7 @@ def test_modes_refit_same_weights_and_prompts_and_restore_on_error(
 
     loader = Loader()
     master = Mock()
+    master.logger = {"log_dir": str(tmp_path)}
     master.model_copy.side_effect = lambda **kw: SimpleNamespace(policy={})
     logger = Mock()
     controller = ModuleType("nemo_rl.algorithms.grpo")
@@ -198,9 +211,11 @@ def test_modes_refit_same_weights_and_prompts_and_restore_on_error(
         events.append("validate " + name)
         if name == fail_mode:
             raise ValueError("validation failed")
-        return {"accuracy": 0.7 if name == "ar" else 0.8, "avg_length": 4}, {
-            "total_validation_time": 2
-        }
+        return {
+            "accuracy": 0.7 if name == "ar" else 0.8,
+            "avg_length": 4,
+            "num_samples": 2,
+        }, {"total_validation_time": 2}
 
     controller.refit_policy_generation = refit
     controller.validate = validate
@@ -213,8 +228,13 @@ def test_modes_refit_same_weights_and_prompts_and_restore_on_error(
             rollout, loader, None, None, 10, master, logger=logger
         )
         assert metrics["accuracy"] == metrics["accuracy/diffusion_conf09"] == 0.8
-        assert metrics["accuracy/ar"] == 0.7
-        assert timings["total_validation_time"] == 4
+        if llada:
+            assert (tmp_path / "accuracy_vs_nfe_step10.png").exists()
+            rows = logger.log_table.call_args.args[1]
+            assert rows == [[10, "diffusion_conf09", 0.9, 6.0, 0.8, 2]]
+        else:
+            assert metrics["accuracy/ar"] == 0.7
+        assert timings["total_validation_time"] == (2 if llada else 4)
         assert metrics["vllm/denoising_nfe/diffusion_conf09"] == 12
         assert metrics["vllm/denoising_nfe"] == 12
         assert "vllm/denoising_nfe/ar" not in metrics
@@ -347,7 +367,12 @@ def test_reference_worker_reads_actual_sampler_counters(asynchronous, diffusion)
     worker = object.__new__(cls)
     worker.cfg = {"vllm_kwargs": {"diffusion_config": {} if diffusion else None}}
     reports = [{"nfe": 5, "committed_tokens": 16}]
-    rpc = AsyncMock(return_value=reports) if asynchronous else Mock(return_value=reports)
+    if not asynchronous:
+        # Synchronous engines retain host totals because sleep discards GPU counters.
+        worker._diffusion_totals = _diffusion_counters(reports)
+    rpc = (
+        AsyncMock(return_value=reports) if asynchronous else Mock(return_value=reports)
+    )
     worker.llm = SimpleNamespace(
         collective_rpc=rpc,
         get_metrics=Mock(
@@ -363,7 +388,10 @@ def test_reference_worker_reads_actual_sampler_counters(asynchronous, diffusion)
     if diffusion:
         assert result["vllm:diffusion_num_denoising_steps"] == 5
         assert result["vllm:diffusion_num_committed_tokens"] == 16
-        rpc.assert_called_once()
+        if asynchronous:
+            rpc.assert_called_once()
+        else:
+            rpc.assert_not_called()
     else:
         assert "vllm:diffusion_num_denoising_steps" not in result
         rpc.assert_not_called()

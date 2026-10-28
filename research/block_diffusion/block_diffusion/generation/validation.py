@@ -15,7 +15,14 @@
 
 import copy
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from block_diffusion.generation.confidence_sweep import (
+    log_sweep,
+    sweep_modes,
+    sweep_points,
+)
 
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field, model_validator
@@ -44,7 +51,10 @@ class ValidationModelConfig(BaseModel, extra="forbid"):
             if self.diffusion_config is None
             else "NemotronLabsDiffusionModel"
         )
-        if self.hf_overrides.get("architectures") != [architecture]:
+        llada = self.hf_overrides.get("architectures") == ["LLaDAModelLM"]
+        if llada and self.diffusion_config is None:
+            raise ValueError("LLaDA validation requires diffusion decoding")
+        if not llada and self.hf_overrides.get("architectures") != [architecture]:
             raise ValueError(
                 f"Validation mode requires architectures: [{architecture}]"
             )
@@ -60,9 +70,9 @@ class ValidationModelConfig(BaseModel, extra="forbid"):
                 raise ValueError(
                     "Pin all validation diffusion decoding knobs explicitly"
                 )
-            if self.diffusion_config["canvas_length"] != self.hf_overrides.get(
-                "block_size"
-            ):
+            if not llada and self.diffusion_config[
+                "canvas_length"
+            ] != self.hf_overrides.get("block_size"):
                 raise ValueError(
                     "Validation canvas_length must match hf_overrides.block_size"
                 )
@@ -252,6 +262,19 @@ class MultiModeValidation:
                 self.policy.offload_after_refit()
             if not policy_generation.wake_up():
                 raise RuntimeError("Could not restore rollout engines after validation")
+        if all(
+            v.vllm_kwargs.hf_overrides.get("architectures") == ["LLaDAModelLM"]
+            for v in self.variants.values()
+        ):
+            modes = sweep_modes({k: v.model_dump() for k, v in self.variants.items()})
+            if modes:
+                log_sweep(
+                    sweep_points(metrics, modes),
+                    step=step,
+                    output=Path(master_config.logger["log_dir"]),
+                    logger=logger,
+                    nfe_description="NFE counts full-canvas denoising model forward passes.",
+                )
         return metrics, timings
 
     def shutdown(self) -> None:

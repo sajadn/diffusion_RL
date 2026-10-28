@@ -597,7 +597,7 @@ def test_vllm_gsm8k_preserves_megatron_validation(auxiliary):
     assert config.policy.train_global_batch_size == 1024
     assert bool(config.policy.get("diffusion_aux_loss")) is auxiliary
     config.just_grpo.validation_runtime = "generation"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="full-canvas selection"):
         validate_config(config)
 
 
@@ -645,3 +645,73 @@ def test_vllm_gsm8k_smoke_config():
     assert config.policy.train_global_batch_size == 32
     assert config.policy.train_micro_batch_size == 2
     assert config.grpo.val_at_start and config.grpo.val_at_end
+
+
+@pytest.mark.parametrize("named", [True, False])
+def test_vllm_validation_pins_full_canvas_modes_without_changing_rollouts(named):
+    from just_grpo.config import llada_vllm_validation_variants
+    from block_diffusion.generation.validation import (
+        build_validation_config,
+        validation_variants,
+    )
+    from omegaconf import OmegaConf
+
+    register_omegaconf_resolvers()
+    config = load_config(
+        Path(__file__).resolve().parents[2]
+        / "configs/recipes"
+        / "just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-fullcanvas-val-long.yaml"
+    )
+    if not named:
+        config.just_grpo.validation_modes = {}
+    rollout = OmegaConf.to_container(config.policy.generation, resolve=True)
+    diffusion = validate_config(config)
+    raw = llada_vllm_validation_variants(config, diffusion)
+    parsed = validation_variants({"vllm_val_dllm_variants": raw})
+    assert len(parsed) == (4 if named else 1)
+    for name, variant in parsed.items():
+        evaluation = build_validation_config(rollout, name, variant)
+        dc = evaluation["vllm_kwargs"]["diffusion_config"]
+        assert dc["canvas_length"] == dc["max_denoising_steps"] == 256
+        assert dc["selection_policy"] != "leftmost"
+        assert evaluation["ignore_eos"] and evaluation["stop_token_ids"] == []
+        assert not dc["return_reveal_steps"]
+        assert evaluation["refit_namespace"] != rollout.get("refit_namespace")
+    assert OmegaConf.to_container(config.policy.generation, resolve=True) == rollout
+    assert rollout["vllm_kwargs"]["diffusion_config"]["selection_policy"] == "leftmost"
+    # The saved, expanded run config remains valid when loaded again.
+    config.policy.generation.vllm_val_dllm_variants = raw
+    validate_config(config)
+
+
+def test_entrypoint_selects_optional_vllm_validation(monkeypatch):
+    import importlib.util
+    from block_diffusion import training
+
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "llada_entrypoint", root / "run_just_grpo.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    call = MagicMock()
+    monkeypatch.setattr(training, "run", call)
+    register_omegaconf_resolvers()
+    for runtime in ["generation", "megatron_llada"]:
+        config = load_config(
+            root
+            / "configs/recipes/just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long.yaml"
+        )
+        config.just_grpo.validation_runtime = runtime
+        if runtime == "generation":
+            config.just_grpo.validation_sampling.block_size = 256
+            config.just_grpo.validation_sampling.max_steps = 256
+        module.run(config)
+        kwargs = call.call_args.kwargs
+        if runtime == "generation":
+            assert kwargs["validation_fn_factory"] is None
+            assert len(config.policy.generation.vllm_val_dllm_variants) == 4
+        else:
+            assert callable(kwargs["validation_fn_factory"])
+            assert config.policy.generation.get("vllm_val_dllm_variants") is None
+        assert config.just_grpo.sampling.selection_policy == "leftmost"

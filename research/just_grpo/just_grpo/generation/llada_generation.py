@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from block_diffusion.generation.confidence_sweep import SweepPoint, make_figure
+from block_diffusion.generation.confidence_sweep import SweepPoint, log_sweep
 
 
 if TYPE_CHECKING:
@@ -121,37 +121,13 @@ def validate_llada(
             )
             for name, params in modes.items()
         ]
-        figure = make_figure(
-            {"Current policy": points},
+        log_sweep(
+            points,
             step=step,
+            output=output,
+            logger=logger,
             nfe_description="NFE counts full-canvas model forward passes.",
         )
-        figure.savefig(output / f"accuracy_vs_nfe_step{step}.png", dpi=160, bbox_inches="tight")
-        if logger is not None:
-            logger.log_table(
-                [
-                    "training_step",
-                    "variant",
-                    "confidence_threshold",
-                    "mean_denoising_nfe",
-                    "accuracy",
-                    "num_samples",
-                ],
-                [
-                    [
-                        step,
-                        p.variant,
-                        p.threshold,
-                        p.mean_nfe,
-                        p.accuracy,
-                        p.num_samples,
-                    ]
-                    for p in points
-                ],
-                step,
-                "validation/accuracy_vs_nfe_data",
-            )
-            logger.log_plot(figure, step, "validation/accuracy_vs_nfe")
     return metrics, timings
 
 

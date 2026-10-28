@@ -80,7 +80,7 @@ def test_deepscaler_recipe_has_causal_rollouts_and_two_validation_modes():
     )
 
 
-@pytest.mark.parametrize("algorithm", ["ar", "just", "trace"])
+@pytest.mark.parametrize("algorithm", ["ar", "just", "trace", "just_eval"])
 @pytest.mark.parametrize("asynchronous", [True, False])
 @pytest.mark.parametrize("fail_training", [False, True])
 def test_shared_driver_wires_dual_validation_and_training(
@@ -95,7 +95,7 @@ def test_shared_driver_wires_dual_validation_and_training(
     if algorithm == "ar":
         run = lambda cfg: driver.run(cfg, generation_python="/vllm/python")
     else:
-        if algorithm == "just":
+        if algorithm in ("just", "just_eval"):
             from run_just_grpo import run
 
             config = load_config(
@@ -113,6 +113,9 @@ def test_shared_driver_wires_dual_validation_and_training(
             config.trace_grpo.generation_python = "/vllm/python"
         if not asynchronous:
             config.cluster.num_nodes = 4
+    if algorithm == "just_eval":
+        entrypoint_run = run
+        run = lambda cfg: entrypoint_run(cfg, evaluation_only=True)
     config.logger.log_dir = str(tmp_path)
     config.grpo.async_grpo.enabled = asynchronous
     config.policy.generation.colocated.enabled = not asynchronous
@@ -122,7 +125,9 @@ def test_shared_driver_wires_dual_validation_and_training(
         if asynchronous
         else "block_diffusion.generation.reference_vllm.ReferenceVllmWorker"
     )
-    validation = Mock()
+    validation = Mock(return_value=({"accuracy": 0.8}, {"total_validation_time": 1.0}))
+    if algorithm == "just_eval" and fail_training:
+        validation.side_effect = RuntimeError("training failed")
     monkeypatch.setattr(training, "MultiModeValidation", Mock(return_value=validation))
     policy, generation, tokenizer = Mock(), Mock(), Mock()
     train_cluster, inference_cluster = Mock(), Mock()
@@ -203,22 +208,34 @@ def test_shared_driver_wires_dual_validation_and_training(
         inference_cluster=inference_cluster,
         refit_buffer_size_gb=1.0,
     )
-    assert trainer.call_args.kwargs["shift_labels"] is (algorithm == "ar")
-    assert ("diffusion_config" in trainer.call_args.args[11].policy) is (
-        algorithm != "ar"
-    )
-    if algorithm == "trace":
-        assert (
-            trainer.call_args.kwargs[
-                "prepare_training_data_fn"
-            ].__self__.__class__.__name__
-            == "TraceGRPO"
+    if algorithm == "just_eval":
+        trainer.assert_not_called()
+        validation.assert_called_once()
+        assert validation.call_args.args[:4] == (
+            generation,
+            val_data,
+            tokenizer,
+            val_environments,
         )
+        generation.prepare_for_generation.assert_called_once()
+        generation.finish_generation.assert_called_once()
     else:
-        assert "prepare_training_data_fn" not in trainer.call_args.kwargs
-    assert trainer.call_args.kwargs["validation_fn"] is validation
-    if asynchronous:
-        assert trainer.call_args.kwargs["max_trajectory_age_steps"] == 1
+        assert trainer.call_args.kwargs["shift_labels"] is (algorithm == "ar")
+        assert ("diffusion_config" in trainer.call_args.args[11].policy) is (
+            algorithm != "ar"
+        )
+        if algorithm == "trace":
+            assert (
+                trainer.call_args.kwargs[
+                    "prepare_training_data_fn"
+                ].__self__.__class__.__name__
+                == "TraceGRPO"
+            )
+        else:
+            assert "prepare_training_data_fn" not in trainer.call_args.kwargs
+        assert trainer.call_args.kwargs["validation_fn"] is validation
+        if asynchronous:
+            assert trainer.call_args.kwargs["max_trajectory_age_steps"] == 1
     validation.shutdown.assert_called_once()
     generation.shutdown.assert_called_once()
     cleanup.assert_called_once_with(environments, val_environments)

@@ -23,6 +23,7 @@ from block_diffusion.config import (
 from block_diffusion.config import (
     DiffusionSamplingParams as DiffusionSamplingParams,
 )
+from block_diffusion.generation.validation import validation_variants
 from block_diffusion.validation import validate_experiment
 from omegaconf import DictConfig, OmegaConf
 from pydantic import Field, model_validator
@@ -68,6 +69,7 @@ class JustGRPOConfig(DiffusionExperimentConfig):
         llada_validation = (
             self.runtime == "megatron_llada"
             or self.validation_runtime == "megatron_llada"
+            or (self.runtime == "reference_vllm" and bool(self.validation_modes))
         )
         if self.validation_runtime == "megatron_llada" and self.runtime not in (
             "megatron_llada",
@@ -77,7 +79,9 @@ class JustGRPOConfig(DiffusionExperimentConfig):
                 "Megatron LLaDA validation requires a LLaDA-compatible runtime"
             )
         if self.validation_modes and not llada_validation:
-            raise ValueError("Named LLaDA validation modes require megatron_llada")
+            raise ValueError(
+                "Named LLaDA validation modes require a LLaDA-compatible runtime"
+            )
         if any(
             not re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in self.validation_modes
         ):
@@ -141,13 +145,73 @@ def validate_config(config: DictConfig) -> JustGRPOConfig:
         raise ValueError(
             "Megatron LLaDA validation requires the full-canvas LLaDA worker"
         )
-    if llada_worker and diffusion.runtime != "megatron_llada":
-        if diffusion.validation_runtime != "megatron_llada" and (
-            diffusion.validation_sampling != diffusion.sampling
-            or diffusion.validation_modes
-        ):
+    if llada_worker and (
+        diffusion.schedule.reveal_tokens_per_step != 1
+        or diffusion.training_token_fraction != 1
+    ):
+        raise ValueError("LLaDA supports exact one-token JustGRPO replay only")
+    if diffusion.validation_modes and not llada_worker:
+        raise ValueError("Named LLaDA validation modes require the LLaDA policy worker")
+    if llada_worker and diffusion.runtime == "reference_vllm":
+        supplied = config.policy.generation.get("vllm_val_dllm_variants")
+        if diffusion.validation_runtime == "generation":
+            expected = llada_vllm_validation_variants(config, diffusion)
+            if (
+                supplied is not None
+                and OmegaConf.to_container(supplied, resolve=True) != expected
+            ):
+                raise ValueError(
+                    "vLLM validation engines must match just_grpo.validation_modes"
+                )
+        elif supplied is not None:
             raise ValueError(
-                "Separate LLaDA validation decoders require validation_runtime=megatron_llada"
+                "Megatron validation cannot also configure vLLM validation engines"
             )
     validate_experiment(config, diffusion)
     return diffusion
+
+
+def llada_vllm_validation_variants(
+    config: DictConfig, diffusion: JustGRPOConfig
+) -> dict:
+    """Build explicit full-canvas evaluation engines from the named LLaDA modes."""
+    generation = config.policy.generation
+    canvas = generation.max_new_tokens
+    modes = diffusion.validation_modes or {"validation": diffusion.validation_sampling}
+    variants = {}
+    for name, params in modes.items():
+        if params.block_size != canvas:
+            raise ValueError(
+                "vLLM LLaDA validation requires block_size == max_new_tokens "
+                "(full-canvas selection); use validation_runtime=megatron_llada "
+                "for 32-token-block selection"
+            )
+        if not 1 <= params.max_steps <= canvas or canvas % params.max_steps:
+            raise ValueError("Validation max_steps must divide the full canvas length")
+        if params.selection_policy not in ("low_confidence", "confidence_threshold"):
+            raise ValueError("vLLM LLaDA validation requires confidence unmasking")
+        if (
+            params.selection_policy == "confidence_threshold"
+            and params.max_steps != canvas
+        ):
+            raise ValueError(
+                "Confidence threshold validation requires one step per canvas token"
+            )
+        variants[name] = {
+            "temperature": params.temperature,
+            "vllm_cfg": {
+                "gpu_memory_utilization": generation.vllm_cfg.gpu_memory_utilization,
+            },
+            "vllm_kwargs": {
+                "hf_overrides": {"architectures": ["LLaDAModelLM"]},
+                "diffusion_config": {
+                    "canvas_length": canvas,
+                    "max_denoising_steps": params.max_steps,
+                    "temperature": params.temperature,
+                    "selection_policy": params.selection_policy,
+                    "confidence_threshold": params.threshold,
+                },
+            },
+        }
+    validation_variants({"vllm_val_dllm_variants": variants})
+    return variants
