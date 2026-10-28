@@ -10,7 +10,6 @@ policy:
   # Match the existing MATH recipe's prompt budget; retain all 500 questions.
   max_total_sequence_length: 1280
   generation:
-    val_temperature: ${just_grpo.validation_sampling.temperature}
     vllm_cfg:
       max_model_len: ${policy.max_total_sequence_length}
     vllm_kwargs:

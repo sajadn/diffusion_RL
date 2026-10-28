@@ -62,7 +62,8 @@ just_grpo:
 
 policy:
   generation:
-    val_temperature: ${just_grpo.validation_sampling.temperature}
+    # Greedy decoding is controlled by just_grpo.validation_sampling/modes.
+    # Keep upstream validation sampling equal to training for this custom path.
     backend: vllm
     refit_transport: null
     worker_extension_cls_fqn: block_diffusion.generation.reference_vllm.ReferenceVllmWorker
