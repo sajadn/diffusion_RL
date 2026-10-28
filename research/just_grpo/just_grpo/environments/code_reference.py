@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""AceCode-Hard reward and HumanEval grading through pinned JustGRPO code."""
+"""AceCode-Hard reward and HumanEval/MBPP grading through pinned JustGRPO code."""
 
 import asyncio
 import json
@@ -107,7 +107,7 @@ def score_chunk(rows: list[dict[str, Any]], cfg: CodeReferenceConfig) -> list[fl
         or any(
             not isinstance(value, (int, float))
             or not math.isfinite(value)
-            or not 0 <= value <= (1 if row["kind"] == "humaneval" else 2)
+            or not 0 <= value <= (2 if row["kind"] == "acecode" else 1)
             for value, row in zip(scores, rows, strict=True)
         )
     ):
@@ -153,7 +153,7 @@ class CodeReferenceEnvironmentImpl(EnvironmentInterface):
             {**json.loads(info["ground_truth"]), "completion": messages[-1]["content"]}
             for messages, info in zip(message_log_batch, metadata, strict=True)
         ]
-        if any(row["kind"] not in ("acecode", "humaneval") for row in rows):
+        if any(row["kind"] not in ("acecode", "humaneval", "mbpp") for row in rows):
             raise ValueError("Unsupported code reward task kind")
         loop = asyncio.get_running_loop()
         futures = [loop.create_future() for _ in rows]

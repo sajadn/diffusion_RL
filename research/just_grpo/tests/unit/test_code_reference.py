@@ -148,3 +148,72 @@ def test_missing_reward_file_fails_even_with_json_stdout(monkeypatch, tmp_path):
     monkeypatch.setattr(code_reference, "__file__", str(tmp_path / "adapter.py"))
     with pytest.raises(RuntimeError, match="did not produce a valid reward result"):
         score_chunk([{"kind": "acecode", "completion": ""}], config())
+
+
+def test_mbpp_is_binary_without_training_format_reward():
+    problem = {
+        "kind": "mbpp",
+        "task_id": 11,
+        "test": ["assert f(1) == 2", "assert f(3) == 4"],
+    }
+    rows = [
+        {**problem, "completion": completion}
+        for completion in [
+            "def f(x): return x + 1",
+            "```python\ndef f(x): return x + 1\n```",
+            "def f(x): return 0",
+            "def f(:",
+        ]
+    ]
+    assert score_chunk(rows, config()) == [1, 1, 0, 0]
+
+
+def test_mbpp_preparation_matches_reference():
+    import ast
+
+    reference = Path(os.environ["JUSTGRPO_REFERENCE_DIR"])
+    source = ast.parse((reference / "eval.py").read_text())
+    function = next(
+        node
+        for node in source.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_format_mbpp_prompt"
+    )
+    namespace = {"ast": ast}
+    exec(
+        compile(
+            ast.Module(body=[function], type_ignores=[]),
+            "reference_mbpp_prompt",
+            "exec",
+        ),
+        namespace,
+    )
+    raw = reference / "datasets/mbpp.jsonl"
+    records = prepare.mbpp_records(raw, reference / "datasets/mbpp_test.jsonl")
+    rows = [json.loads(line) for line in raw.read_text().splitlines() if line][10:510]
+    assert len(records) == 500
+    for row, record in zip(rows, records, strict=True):
+        assert record["problem"] == namespace["_format_mbpp_prompt"](row)
+        answer = json.loads(record["answer"])
+        assert answer["task_id"] == row["task_id"]
+        assert answer["kind"] == "mbpp" and answer["test"]
+        assert "code" not in answer
+
+
+def test_response_dataset_explicit_task_name(tmp_path):
+    from nemo_rl.data.datasets.response_datasets.response_dataset import ResponseDataset
+
+    path = tmp_path / "questions.jsonl"
+    path.write_text(json.dumps({"problem": "Implement f.", "answer": "tests"}) + "\n")
+    named = ResponseDataset(
+        str(path),
+        input_key="problem",
+        output_key="answer",
+        split="train",
+        task_name="mbpp",
+    )
+    assert named.task_name == "mbpp"
+    assert named.dataset["task_name"] == ["mbpp"]
+    original = ResponseDataset(
+        str(path), input_key="problem", output_key="answer", split="train"
+    )
+    assert original.task_name == f"{tmp_path.name}-questions"

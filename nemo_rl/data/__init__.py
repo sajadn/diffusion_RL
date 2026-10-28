@@ -19,6 +19,8 @@ from nemo_rl.data.energon.config import EnergonLoaderConfig, EnergonSourceConfig
 
 class ResponseDatasetConfig(TypedDict):
     dataset_name: NotRequired[str]
+    # Optional stable task label; ResponseDataset otherwise derives it from data_path.
+    task_name: NotRequired[str | None]
     data_path: NotRequired[str]
     input_key: NotRequired[str]
     output_key: NotRequired[str]

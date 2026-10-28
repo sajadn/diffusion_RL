@@ -46,6 +46,10 @@ class JustGRPOConfig(DiffusionExperimentConfig):
     training_token_fraction: float = Field(gt=0, le=1)
     schedule: ScheduleConfig
     validation_modes: dict[str, DiffusionSamplingParams] = Field(default_factory=dict)
+    validation_per_task: bool = Field(
+        default=False,
+        description="Evaluate each dataset task separately, with its own sample budget and NFE curve.",
+    )
     validation_runtime: Literal["generation", "megatron_llada"] = Field(
         default="generation",
         description="Use the rollout engine, or the live LLaDA policy for validation.",
@@ -108,7 +112,8 @@ class JustGRPOConfig(DiffusionExperimentConfig):
                 raise ValueError("LLaDA supports exact one-token JustGRPO replay only")
             for v in (self.validation_sampling, *self.validation_modes.values()):
                 if (
-                    v.selection_policy not in (
+                    v.selection_policy
+                    not in (
                         "low_confidence",
                         "confidence_threshold",
                         "fork",
@@ -119,9 +124,9 @@ class JustGRPOConfig(DiffusionExperimentConfig):
                     raise ValueError(
                         "LLaDA evaluation requires confidence or Fork unmasking with at most one pass per canvas token"
                     )
-                if (
-                    v.max_steps != v.block_size
-                    and v.selection_policy in ("confidence_threshold", "fork")
+                if v.max_steps != v.block_size and v.selection_policy in (
+                    "confidence_threshold",
+                    "fork",
                 ):
                     raise ValueError(
                         "Fixed parallel LLaDA evaluation requires low_confidence"
@@ -141,6 +146,14 @@ def validate_config(config: DictConfig) -> JustGRPOConfig:
     llada_worker = config.policy.worker_extension_cls_fqn == (
         "just_grpo.algorithms.llada_policy_worker.LLaDAJustGRPOPolicyWorker"
     )
+    if diffusion.validation_per_task and (
+        not llada_worker
+        or (
+            diffusion.runtime != "megatron_llada"
+            and diffusion.validation_runtime != "megatron_llada"
+        )
+    ):
+        raise ValueError("Per-task LLaDA validation requires live Megatron validation")
     if diffusion.validation_runtime == "megatron_llada" and not llada_worker:
         raise ValueError(
             "Megatron LLaDA validation requires the full-canvas LLaDA worker"

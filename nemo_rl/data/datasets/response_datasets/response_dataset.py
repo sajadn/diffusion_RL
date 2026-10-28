@@ -36,7 +36,8 @@ class ResponseDataset(RawDataset):
         subset: Optional subset name for the dataset, used for HuggingFace datasets
         split: Optional split name for the dataset, used for HuggingFace datasets
         split_validation_size: Size of the validation data, default is 0
-        seed: Seed for train/validation split when split_validation_size > 0, default is 42
+        seed: Seed for train/validation split when split_validation_size > 0
+        task_name: Optional explicit name for per-task validation; otherwise derived from data_path, default is 42
     """
 
     def __init__(
@@ -48,13 +49,18 @@ class ResponseDataset(RawDataset):
         split: Optional[str] = None,
         split_validation_size: float = 0,
         seed: int = 42,
+        task_name: Optional[str] = None,
         **kwargs,
     ):
         self.input_key = input_key
         self.output_key = output_key
 
-        self.task_name = "-".join(data_path.split("/")[-2:]).split(".")[0]
-        if self.task_name[0] == "-":
+        self.task_name = (
+            task_name
+            if task_name is not None
+            else "-".join(data_path.split("/")[-2:]).split(".")[0]
+        )
+        if task_name is None and self.task_name[0] == "-":
             self.task_name = self.task_name[1:]
 
         # load from local or huggingface

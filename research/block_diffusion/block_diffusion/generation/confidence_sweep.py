@@ -137,6 +137,7 @@ def log_sweep(
     output: Path,
     logger: Any,
     nfe_description: str,
+    namespace: str = "validation",
 ) -> None:
     """Save a measured comparison and publish it at the trainer's global step."""
     figure = make_figure(
@@ -160,6 +161,6 @@ def log_sweep(
                 for p in points
             ],
             step,
-            "validation/accuracy_vs_nfe_data",
+            f"{namespace}/accuracy_vs_nfe_data",
         )
-        logger.log_plot(figure, step, "validation/accuracy_vs_nfe")
+        logger.log_plot(figure, step, f"{namespace}/accuracy_vs_nfe")

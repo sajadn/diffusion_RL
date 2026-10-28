@@ -1,33 +1,37 @@
-# AceCode-Hard training / all 164 HumanEval tasks for greedy validation.
+# AceCode-Hard training / all 164 HumanEval and 500 MBPP validation tasks.
 # vLLM rollouts; live Megatron validation retains the four-point accuracy/NFE sweep.
 defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long.yaml
 
 grpo:
   num_updates_per_rollout: 1
   val_num_generations_per_prompt: 1
-  # Two batches include the final 36 tasks.
-  max_val_samples: 256
+  # Per-benchmark budget: cover all 164 HumanEval and all 500 MBPP tasks.
+  max_val_samples: 512
   val_batch_size: 128
+
+just_grpo:
+  validation_per_task: true
 
 loss_fn:
   # Preserve the existing AceCode/HumanEval training objective.
   use_importance_sampling_correction: false
 
 policy:
-  max_total_sequence_length: 1536
+  max_total_sequence_length: 4096
   generation:
     vllm_cfg:
       max_model_len: ${policy.max_total_sequence_length}
     vllm_kwargs:
       # Four complete prompt+canvas requests must fit the scheduling budget.
-      max_num_batched_tokens: 6144
+      max_num_batched_tokens: 16384
 
 data:
   _override_: true
   shuffle: true
   num_workers: 1
   use_multiple_dataloader: false
-  max_input_seq_length: ${oc.decode:${oc.env:LLADA_CODE_MAX_PROMPT_TOKENS}}
+  # Longest reference MBPP prompt is 3837 tokens; keep every validation task.
+  max_input_seq_length: 3840
   train:
     dataset_name: ResponseDataset
     data_path: ${oc.env:LLADA_CODE_DATA_DIR}/train.jsonl
@@ -35,11 +39,18 @@ data:
     output_key: answer
     split: train
   validation:
-    dataset_name: ResponseDataset
-    data_path: ${oc.env:LLADA_CODE_DATA_DIR}/validation.jsonl
-    input_key: problem
-    output_key: answer
-    split: train
+    - dataset_name: ResponseDataset
+      task_name: humaneval
+      data_path: ${oc.env:LLADA_CODE_DATA_DIR}/validation.jsonl
+      input_key: problem
+      output_key: answer
+      split: train
+    - dataset_name: ResponseDataset
+      task_name: mbpp
+      data_path: ${oc.env:LLADA_CODE_DATA_DIR}/mbpp.jsonl
+      input_key: problem
+      output_key: answer
+      split: train
   default:
     prompt_file: null
     system_prompt_file: null

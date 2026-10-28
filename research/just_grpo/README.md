@@ -222,25 +222,48 @@ and after each update with the same four greedy decoders and local accuracy/NFE
 artifacts. Checkpointing and W&B are disabled.
 
 
-## HumanEval greedy validation with vLLM rollouts
+## HumanEval and MBPP greedy validation with vLLM rollouts
 
 Use `configs/recipes/just_grpo-acecode-llada8b-16n8g-vllm-humaneval-long.yaml`
-for plain JustGRPO or its `-long-diffaux.yaml` sibling for diffusion auxiliary
-loss. These reuse the existing AceCode-Hard training data and HumanEval grader:
-set `LLADA_CODE_DATA_DIR` (containing `train.jsonl` and `validation.jsonl`),
-`LLADA_CODE_MAX_PROMPT_TOKENS`, `JUSTGRPO_REFERENCE_DIR`, and `POLICY_PYTHON`
-as for the existing AceCode/HumanEval recipes. The context budget is 1536 tokens,
-including the 256-token response canvas.
+or its `-long-diffaux.yaml` sibling. The existing filenames now cover both
+HumanEval and MBPP at every validation step, using the same live policy.
+Training still uses only AceCode-Hard. Set `LLADA_CODE_DATA_DIR` to a directory
+containing `train.jsonl`, HumanEval's `validation.jsonl`, and `mbpp.jsonl`.
+`tools/prepare_code_data.py` accepts optional `--mbpp` and `--mbpp-tests` paths
+for the pinned reference's `datasets/mbpp.jsonl` and `datasets/mbpp_test.jsonl`.
+The MBPP prompt, 500-task split (IDs 11–510), and grading programs follow that
+reference. Also set `JUSTGRPO_REFERENCE_DIR` and `POLICY_PYTHON` as for the existing
+AceCode/HumanEval recipes.
 
-The long recipes use 16 nodes and 125 updates, with vLLM leftmost rollouts at
-T=1. Greedy validation runs on the live Megatron policy at the start, every 10
-updates, and at the end, covering all 164 HumanEval tasks. It retains the
-`fixed1_t0`, `threshold09_t0`, `threshold08_t0`, and `threshold07_t0`
-accuracy/NFE sweep and the training-step plot history. Selection blocks remain
-32 tokens within the full bidirectional canvas. The auxiliary variant uses
-weight 0.1 with 5%–100% masking of positive completions.
+The long recipes use 16 nodes, 125 updates, vLLM leftmost rollouts at T=1, and
+a 4096-token context including the 256-token response canvas. The 3840-token
+prompt limit preserves the longest reference MBPP prompt (3837 tokens). Greedy validation
+runs on the live Megatron policy at the start, every 10 updates, and at the end.
+`just_grpo.validation_per_task: true` gives each named `ResponseDataset` its own
+`grpo.max_val_samples` budget. Both the 164 HumanEval and 500 MBPP tasks are
+therefore covered. Explicit `task_name` values name the metrics and artifacts;
+without that optional field, ResponseDataset retains its path-derived name.
+Per-task LLaDA validation currently requires the live Megatron backend.
+
+Each benchmark gets `fixed1_t0`, `threshold09_t0`, `threshold08_t0`, and
+`threshold07_t0` results and its own training-step accuracy/NFE curve under
+`validation/humaneval/accuracy_vs_nfe` or `validation/mbpp/accuracy_vs_nfe`.
+Local decode statistics and PNGs are stored in `humaneval/` and `mbpp/` under
+the run output. Scalar metrics have benchmark prefixes, for example
+`humaneval/accuracy` and `mbpp/accuracy`; the first configured benchmark
+(HumanEval) remains the unprefixed primary checkpoint-selection metric.
+Selection blocks remain 32 tokens within the full bidirectional canvas.
+The auxiliary variant uses weight 0.1 and 5%–100% masking of positive completions.
 
 For smoke runs, use `just_grpo-acecode-llada8b-2n8g-vllm-humaneval-smoke.yaml`
-or its `-smoke-diffaux.yaml` sibling. These use 2 nodes, 2 updates, 2 prompts × 16
-completions, and 16 validation tasks per mode at the start and after each update.
-Checkpointing and W&B are disabled; local accuracy/NFE artifacts remain enabled.
+or its `-smoke-diffaux.yaml` sibling: 2 nodes, 2 updates, 2 prompts × 16
+completions, and 16 tasks **per benchmark and mode** at the start and after each
+update. Checkpointing and W&B are disabled; local curves remain enabled.
+
+The campaign launcher is `tools/math_code_vllm_20261028/run.sbatch` with arguments
+`smoke|long math|code plain|diffaux [continuation_leg]`. Submit smokes with 2 nodes
+and long runs with 16. It reuses the provisioned GSM8K runtimes, isolates outputs
+and ports, and sets a 0.001 generation-KL limit for smoke jobs only. Long recipes
+retain their disabled finite KL cutoff. Chain long continuation legs with Slurm
+`afterany`; each leg requires a finalized checkpoint and exits once 125 updates
+are complete.

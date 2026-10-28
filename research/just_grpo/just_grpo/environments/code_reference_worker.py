@@ -34,13 +34,15 @@ def score_rows(rows: list[dict]) -> list[float]:
             num_generations=1,
             device="cpu",
         ).tolist()
-    elif kinds == {"humaneval"}:
+    elif kinds in ({"humaneval"}, {"mbpp"}):
         # HumanEval grading uses the reference parser and execution harness.
         from utils.code_exec import build_test_code, check_correctness
 
         scores = []
         for row in rows:
-            program = build_test_code(row, {row["task_id"]: row})
+            program = build_test_code(
+                row, {row["task_id"]: row}, is_mbpp=row["kind"] == "mbpp"
+            )
             result = check_correctness(
                 row["task_id"], {"test_code": program}, timeout=3.0
             )
