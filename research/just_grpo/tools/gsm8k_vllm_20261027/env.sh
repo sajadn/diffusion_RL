@@ -20,4 +20,4 @@ export HF_HOME=/lustre/fsw/portfolios/coreai/users/snorouzi/hf_home
 export LLADA_CODE_MAX_PROMPT_TOKENS=1150
 export LLADA_CODE_SEQUENCE_LENGTH=1536
 
-export GENERATION_PYTHON=/lustre/fsw/portfolios/coreai/users/snorouzi/vllm_runtimes/vllm-llada-fullcanvas/tools/llada/generation-python
+export GENERATION_PYTHON=/lustre/fsw/portfolios/coreai/users/snorouzi/vllm_runtimes/vllm-nemotron-dllm/tools/llada/generation-python
