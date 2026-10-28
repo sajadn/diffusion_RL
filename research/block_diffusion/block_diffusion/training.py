@@ -169,6 +169,11 @@ def run(
             _,
             _,
         ) = setup(master, tokenizer, train_data, val_data, **setup_kwargs)
+        # Continuation launchers reuse the training run, not its telemetry run.
+        if getattr(logger, "wandb_logger", None) is not None:
+            run_url = logger.wandb_logger.run.url
+            if run_url:
+                (output / "wandb_url.txt").write_text(f"{run_url}\n")
         if validation is not None:
             validation.initialize(
                 policy,
