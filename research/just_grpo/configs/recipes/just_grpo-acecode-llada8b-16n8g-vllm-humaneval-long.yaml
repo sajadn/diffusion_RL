@@ -1,0 +1,68 @@
+# AceCode-Hard training / all 164 HumanEval tasks for greedy validation.
+# vLLM rollouts; live Megatron validation retains the four-point accuracy/NFE sweep.
+defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long.yaml
+
+grpo:
+  num_updates_per_rollout: 1
+  val_num_generations_per_prompt: 1
+  # Two batches include the final 36 tasks.
+  max_val_samples: 256
+  val_batch_size: 128
+
+loss_fn:
+  # Preserve the existing AceCode/HumanEval training objective.
+  use_importance_sampling_correction: false
+
+policy:
+  max_total_sequence_length: 1536
+  generation:
+    vllm_cfg:
+      max_model_len: ${policy.max_total_sequence_length}
+    vllm_kwargs:
+      # Four complete prompt+canvas requests must fit the scheduling budget.
+      max_num_batched_tokens: 6144
+
+data:
+  _override_: true
+  shuffle: true
+  num_workers: 1
+  use_multiple_dataloader: false
+  max_input_seq_length: ${oc.decode:${oc.env:LLADA_CODE_MAX_PROMPT_TOKENS}}
+  train:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:LLADA_CODE_DATA_DIR}/train.jsonl
+    input_key: problem
+    output_key: answer
+    split: train
+  validation:
+    dataset_name: ResponseDataset
+    data_path: ${oc.env:LLADA_CODE_DATA_DIR}/validation.jsonl
+    input_key: problem
+    output_key: answer
+    split: train
+  default:
+    prompt_file: null
+    system_prompt_file: null
+    processor: justgrpo_code
+    env_name: justgrpo_code
+
+env:
+  _override_: true
+  justgrpo_code:
+    reference_dir: ${oc.env:JUSTGRPO_REFERENCE_DIR}
+    reference_revision: 1a2fddb5c6655597e63081c0af5ebb718a849f39
+    python_executable: ${oc.env:POLICY_PYTHON}
+    num_workers: 8
+    chunk_size: 16
+    # Coalesce per-sample rollout requests before invoking the reference grader.
+    batch_wait_seconds: 0.01
+    timeout_seconds: 600
+
+checkpointing:
+  save_period: 10
+  ft_save_period: 1
+
+logger:
+  log_dir: ${oc.env:LOG_DIR,logs/llada_acecode_humaneval_vllm_greedy}
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,llada_acecode_humaneval_vllm_greedy}

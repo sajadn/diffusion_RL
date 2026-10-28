@@ -1,0 +1,26 @@
+# Match the GSM8K/MATH vLLM smoke size and retain all four greedy modes.
+defaults: just_grpo-acecode-llada8b-16n8g-vllm-humaneval-long.yaml
+
+grpo:
+  num_prompts_per_step: 2
+  num_generations_per_prompt: 16
+  max_num_steps: 2
+  val_period: 1
+  max_val_samples: 16
+  val_batch_size: 16
+
+cluster:
+  num_nodes: 2
+
+policy:
+  train_micro_batch_size: 2
+  logprob_batch_size: 2
+
+checkpointing:
+  enabled: false
+
+logger:
+  wandb_enabled: false
+  log_dir: ${oc.env:LOG_DIR,logs/llada_acecode_humaneval_vllm_greedy_smoke}
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,llada_acecode_humaneval_vllm_greedy_smoke}

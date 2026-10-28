@@ -220,3 +220,27 @@ They match the GSM8K vLLM smoke size: 2 nodes, 2 updates, 2 prompts × 16
 completions, and 16 validation questions per mode. Validation runs at the start
 and after each update with the same four greedy decoders and local accuracy/NFE
 artifacts. Checkpointing and W&B are disabled.
+
+
+## HumanEval greedy validation with vLLM rollouts
+
+Use `configs/recipes/just_grpo-acecode-llada8b-16n8g-vllm-humaneval-long.yaml`
+for plain JustGRPO or its `-long-diffaux.yaml` sibling for diffusion auxiliary
+loss. These reuse the existing AceCode-Hard training data and HumanEval grader:
+set `LLADA_CODE_DATA_DIR` (containing `train.jsonl` and `validation.jsonl`),
+`LLADA_CODE_MAX_PROMPT_TOKENS`, `JUSTGRPO_REFERENCE_DIR`, and `POLICY_PYTHON`
+as for the existing AceCode/HumanEval recipes. The context budget is 1536 tokens,
+including the 256-token response canvas.
+
+The long recipes use 16 nodes and 125 updates, with vLLM leftmost rollouts at
+T=1. Greedy validation runs on the live Megatron policy at the start, every 10
+updates, and at the end, covering all 164 HumanEval tasks. It retains the
+`fixed1_t0`, `threshold09_t0`, `threshold08_t0`, and `threshold07_t0`
+accuracy/NFE sweep and the training-step plot history. Selection blocks remain
+32 tokens within the full bidirectional canvas. The auxiliary variant uses
+weight 0.1 with 5%–100% masking of positive completions.
+
+For smoke runs, use `just_grpo-acecode-llada8b-2n8g-vllm-humaneval-smoke.yaml`
+or its `-smoke-diffaux.yaml` sibling. These use 2 nodes, 2 updates, 2 prompts × 16
+completions, and 16 validation tasks per mode at the start and after each update.
+Checkpointing and W&B are disabled; local accuracy/NFE artifacts remain enabled.
