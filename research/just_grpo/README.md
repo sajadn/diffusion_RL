@@ -273,7 +273,7 @@ partition with `--dependency=afterany:<smoke-job-id>`, taking arguments
 `<smoke-job-id> <math|code> <plain|diffaux>`. It requires a successful smoke,
 two finite generation KL measurements below 0.001, and complete validation
 sweeps before submitting the matching 16-node long run. It records submission
-attempts to prevent duplicates and chains up to eight four-hour allocations via
+attempts to prevent duplicates and chains up to five four-hour allocations (initial job plus four continuations) via
 `afterany`. Continuations require a finalized checkpoint and stop at 300 updates.
 
 

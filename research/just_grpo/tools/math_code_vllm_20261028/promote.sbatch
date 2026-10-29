@@ -55,10 +55,10 @@ print(max(candidates)[1])
 ACCOUNT
 )
 echo "Production account selected by current fairshare: $account"
-# Eight allocations provide up to 32 hours. Each continuation checks the latest
+# Five allocations provide up to 20 hours (initial job plus four continuations). Each continuation checks the latest
 # finalized checkpoint and exits without starting training once step 300 exists.
 previous=
-for leg in 0 1 2 3 4 5 6 7; do
+for leg in 0 1 2 3 4; do
   dependency=()
   if [[ -n "$previous" ]]; then dependency=(--dependency="afterany:$previous"); fi
   cmd=(sbatch --parsable -A "$account" -p batch --nodes=16 --mem=0 --time=04:00:00
