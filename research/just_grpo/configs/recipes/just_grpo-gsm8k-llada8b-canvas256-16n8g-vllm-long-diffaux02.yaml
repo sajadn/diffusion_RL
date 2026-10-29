@@ -1,0 +1,9 @@
+# GSM8K diffusion auxiliary-loss coefficient ablation.
+defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long-diffaux.yaml
+
+grpo:
+  max_num_steps: 300
+
+policy:
+  diffusion_aux_loss:
+    weight: 0.2

@@ -8,8 +8,8 @@
 set -euo pipefail
 source /lustre/fsw/portfolios/coreai/users/snorouzi/RL-Rebase/RL-research/research/just_grpo/tools/math_code_vllm_20261028/env.sh
 stage=${1:?smoke or long}
-task=${2:?math or code}
-variant=${3:?plain or diffaux}
+task=${2:?math, code, or gsm8k}
+variant=${3:?plain, diffaux, diffaux02, or diffaux03}
 leg=${4:-0}
 case "$stage" in
   smoke) nodes=2; size=2n8g ;;
@@ -20,11 +20,19 @@ esac
 case "$task" in
   math) recipe="just_grpo-math-llada8b-canvas256-${size}-vllm-${stage}" ;;
   code) recipe="just_grpo-acecode-llada8b-${size}-vllm-humaneval-${stage}" ;;
+  gsm8k)
+    [[ "$stage" == long && ( "$variant" == diffaux02 || "$variant" == diffaux03 ) ]]
+    recipe="just_grpo-gsm8k-llada8b-canvas256-${size}-vllm-${stage}"
+    ;;
   *) exit 2 ;;
 esac
 case "$variant" in
   plain) ;;
   diffaux) recipe+=-diffaux ;;
+  diffaux02|diffaux03)
+    [[ "$task" == gsm8k ]]
+    recipe+="-$variant"
+    ;;
   *) exit 2 ;;
 esac
 export OUTPUT_DIR="$RUN_ROOT/${task}_${variant}/$stage"
@@ -65,6 +73,8 @@ elif compgen -G "$CHECKPOINT_ROOT/step_*" >/dev/null; then
 fi
 if [[ "$task" == code ]]; then
   label=acecode_humaneval_mbpp
+elif [[ "$task" == gsm8k ]]; then
+  label=gsm8k_canvas256
 else
   label=math12k_math500
 fi

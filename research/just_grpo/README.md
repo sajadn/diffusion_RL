@@ -275,3 +275,19 @@ two finite generation KL measurements below 0.001, and complete validation
 sweeps before submitting the matching 16-node long run. It records submission
 attempts to prevent duplicates and chains up to eight four-hour allocations via
 `afterany`. Continuations require a finalized checkpoint and stop at 300 updates.
+
+
+### GSM8K auxiliary coefficient ablations
+
+`just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long-diffaux02.yaml` and
+`just_grpo-gsm8k-llada8b-canvas256-16n8g-vllm-long-diffaux03.yaml` inherit the
+0.1 auxiliary-loss recipe, changing the coefficient to 0.2 or 0.3 and the
+training budget to 300 updates. They retain vLLM leftmost rollouts at T=1,
+greedy live-policy validation with four accuracy/NFE modes, and 5%–100%
+masking on positive-advantage samples.
+
+Use `tools/math_code_vllm_20261028/run.sbatch long gsm8k diffaux02 <leg>`
+(or `diffaux03`) with 16 nodes and four-hour allocations. Outputs are under
+that campaign's `gsm8k_diffaux02/long` and `gsm8k_diffaux03/long` directories.
+Leg 0 starts fresh; subsequent legs resume a finalized checkpoint with
+`afterany` dependencies and stop once 300 updates are complete.
