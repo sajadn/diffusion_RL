@@ -1,0 +1,15 @@
+# Full SuperV3 dataset and environments with positive-completion diffusion CE.
+# Inherit in-order sampling, 32K generation / 28K thinking, and 48K context.
+defaults: ar_grpo_superv3_exp544_step100_helpful_32k_in_order.yaml
+
+policy:
+  worker_extension_cls_fqn: ar_grpo.positive_diffusion_policy.PositiveDiffusionARPolicy
+  diffusion_aux_loss:
+    type: diffusion
+    weight: 0.1
+    positive_samples: advantage
+    mask_token_id: 100
+    block_size: 16
+    mask_probability_min: 0.05
+    mask_probability_max: 1.0
+    seed: 42
