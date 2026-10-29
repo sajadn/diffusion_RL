@@ -1,0 +1,83 @@
+# NLD OPD Exp544 step100: SuperV3 plain math + coding, AR GRPO + diffusion CE.
+# Run with research/ar_grpo/run_ar_grpo.py (SingleController).
+# Inherits helpful fallback, 28K thinking / 32K generation, and 8 train + 16 gen nodes.
+# Data preserves the existing train/validation split and source proportions.
+# Subsets: skyworks_no_omni, dapo17k, math_holdout_small_igor, math_turing,
+#          comp_coding, nemotronx_code. Python-tool math subsets are excluded.
+defaults: ar_grpo_superv3_exp544_step100_helpful_32k_in_order.yaml
+
+policy:
+  worker_extension_cls_fqn: ar_grpo.positive_diffusion_policy.PositiveDiffusionARPolicy
+  diffusion_aux_loss:
+    type: diffusion
+    weight: 0.1
+    positive_samples: advantage
+    mask_token_id: 100
+    block_size: 16
+    mask_probability_min: 0.05
+    mask_probability_max: 1.0
+    seed: 42
+
+data:
+  train:
+    data_path: /lustre/fsw/portfolios/coreai/users/snorouzi/diffusion_rl/dataset/v30_math_code_diffaux_20261011/train.jsonl
+  validation:
+    data_path: /lustre/fsw/portfolios/coreai/users/snorouzi/diffusion_rl/dataset/v30_math_code_diffaux_20261011/val.jsonl
+
+# Replace the environment block to omit the unused ns_tools server and agent.
+env:
+  _override_: true
+  math:
+    num_workers: 8
+    math_verify_impl: hf_math_verify
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  nemo_gym:
+    uv_venv_dir: /lustre/fsw/portfolios/coreai/users/snorouzi/gym_venvs
+    uv_cache_dir: /lustre/fsw/portfolios/coreai/users/snorouzi/gym_cache/uv
+    skip_venv_if_present: true
+    config_paths:
+      - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+      - resources_servers/math_with_judge/configs/math_with_judge.yaml
+      - resources_servers/code_gen/configs/code_gen.yaml
+    math_with_judge:
+      resources_servers:
+        math_with_judge:
+          should_use_judge: false
+          verifier_workers: 8
+          verifier_timeout_s: 30
+    code_gen:
+      resources_servers:
+        code_gen:
+          num_processes: 2048
+          unit_test_timeout_secs: 10
+    policy_model:
+      responses_api_models:
+        vllm_model:
+          num_workers: 8
+          return_entropy: false
+          uses_reasoning_parser: true
+          chat_template_kwargs:
+            enable_thinking: true
+            reasoning_budget: 28672
+          extra_body:
+            thinking_token_budget: 28672
+    port_range_low: 2000
+    port_range_high: 5999
+    global_aiohttp_client_timeout_s: 1800
+    rollout_diagnostics_dir: ${logger.log_dir}/diagnostics
+    code_gen_simple_agent:
+      responses_api_agents:
+        simple_agent:
+          max_steps: 5
+    math_with_judge_simple_agent:
+      responses_api_agents:
+        simple_agent:
+          max_steps: 1
+
+logger:
+  log_dir: ${oc.env:LOG_DIR,logs/ar-superv3-opd-math-code-diffaux01}
+  wandb:
+    name: ${oc.env:WANDB_RUN_NAME,ar_superv3_opd_math_code_diffaux01}
+checkpointing:
+  checkpoint_dir: ${oc.env:CHECKPOINT_DIR,results/ar-superv3-opd-math-code-diffaux01}
