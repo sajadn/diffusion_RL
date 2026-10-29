@@ -291,3 +291,10 @@ Use `tools/math_code_vllm_20261028/run.sbatch long gsm8k diffaux02 <leg>`
 that campaign's `gsm8k_diffaux02/long` and `gsm8k_diffaux03/long` directories.
 Leg 0 starts fresh; subsequent legs resume a finalized checkpoint with
 `afterany` dependencies and stop once 300 updates are complete.
+
+
+The campaign launcher accepts an optional fifth argument, a run tag such as
+`contextfix`, to create a fresh output/checkpoint directory and W&B name. Pass
+the same tag to every continuation. For MATH, vLLM reserves 1536 positions
+(1024 prompt + 256 response + 256 extra canvas reservation), while the policy
+sequence limit remains 1280.

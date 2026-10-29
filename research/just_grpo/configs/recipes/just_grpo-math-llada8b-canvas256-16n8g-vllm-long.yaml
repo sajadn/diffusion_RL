@@ -12,10 +12,11 @@ policy:
   max_total_sequence_length: 1280
   generation:
     vllm_cfg:
-      max_model_len: ${policy.max_total_sequence_length}
+      # The reference worker reserves an additional diffusion canvas.
+      max_model_len: 1536
     vllm_kwargs:
       # Four complete prompt+canvas requests must fit the scheduling budget.
-      max_num_batched_tokens: 5120
+      max_num_batched_tokens: 6144
 
 data:
   _override_: true

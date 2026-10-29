@@ -11,6 +11,10 @@ stage=${1:?smoke or long}
 task=${2:?math, code, or gsm8k}
 variant=${3:?plain, diffaux, diffaux02, or diffaux03}
 leg=${4:-0}
+run_tag=${5:-}
+if [[ -n "$run_tag" ]]; then
+  [[ "$run_tag" =~ ^[A-Za-z0-9_-]+$ ]]
+fi
 case "$stage" in
   smoke) nodes=2; size=2n8g ;;
   long) nodes=16; size=16n8g ;;
@@ -35,7 +39,7 @@ case "$variant" in
     ;;
   *) exit 2 ;;
 esac
-export OUTPUT_DIR="$RUN_ROOT/${task}_${variant}/$stage"
+export OUTPUT_DIR="$RUN_ROOT/${task}_${variant}/$stage${run_tag:+_$run_tag}"
 if [[ "$stage" == smoke ]]; then
   export OUTPUT_DIR="${OUTPUT_DIR}_${SLURM_JOB_ID}"
 fi
@@ -78,7 +82,7 @@ elif [[ "$task" == gsm8k ]]; then
 else
   label=math12k_math500
 fi
-export WANDB_RUN_NAME="llada_${label}_${variant}_vllm_greedy_20261028"
+export WANDB_RUN_NAME="llada_${label}_${variant}_vllm_greedy_20261028${run_tag:+_$run_tag}"
 port_base=$((18000 + SLURM_JOB_ID % 1000 * 20))
 export PORT=$port_base RAY_CLIENT_SERVER_PORT=$((port_base+1)) DASHBOARD_PORT=$((port_base+2))
 export NODE_MANAGER_PORT=$((port_base+3)) OBJECT_MANAGER_PORT=$((port_base+5))
