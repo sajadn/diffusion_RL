@@ -294,3 +294,32 @@ def test_checkpointing_is_supported(async_mode: bool) -> None:
     config.checkpointing.enabled = True
     config.checkpointing.save_optimizer = True
     validate_config(config)
+
+
+@pytest.mark.parametrize("force_ratio", [False, True])
+def test_sync_llada_accepts_optional_on_policy_ratio(force_ratio: bool) -> None:
+    config = load(
+        PROJECT
+        / "configs/recipes"
+        / "just_grpo-gsm8k-llada8b-canvas256-16n8g-megatron-inference-long.yaml"
+    )
+    config.loss_fn.force_on_policy_ratio = force_ratio
+    validate_config(config)
+
+
+@pytest.mark.parametrize("invalid", ["async", "multiple_updates"])
+def test_llada_on_policy_ratio_requires_one_synchronous_update(invalid: str) -> None:
+    config = load(
+        PROJECT
+        / "configs/recipes"
+        / "just_grpo-gsm8k-llada8b-canvas256-16n8g-megatron-inference-long.yaml"
+    )
+    config.loss_fn.force_on_policy_ratio = True
+    if invalid == "async":
+        config.grpo.async_grpo.enabled = True
+        message = "force_on_policy_ratio requires synchronous"
+    else:
+        config.policy.train_global_batch_size //= 2
+        message = "one global optimizer update"
+    with pytest.raises(ValueError, match=message):
+        validate_config(config)

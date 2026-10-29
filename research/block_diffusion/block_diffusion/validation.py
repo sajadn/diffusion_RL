@@ -47,9 +47,20 @@ def validate_experiment(
             block_size=diffusion.schedule.block_size,
         )
     if require_policy_scores and loss.force_on_policy_ratio:
-        raise ValueError(
-            "Diffusion GRPO requires recomputed prev_logprobs; force_on_policy_ratio must be false"
-        )
+        # LLaDA replays the same deterministic canvas in scoring and training,
+        # accumulating every reveal (and auxiliary loss) before one update.
+        # Other diffusion schedules may score different contexts or token subsets.
+        if p.worker_extension_cls_fqn != (
+            "just_grpo.algorithms.llada_policy_worker.LLaDAJustGRPOPolicyWorker"
+        ):
+            raise ValueError(
+                "Diffusion GRPO requires recomputed prev_logprobs except for "
+                "synchronous LLaDA JustGRPO"
+            )
+        if g.async_grpo.enabled:
+            raise ValueError(
+                "force_on_policy_ratio requires synchronous LLaDA training"
+            )
     if (
         min(
             g.max_num_steps,

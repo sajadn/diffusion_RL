@@ -24,6 +24,7 @@ from block_diffusion.positive_diffusion import (
 from just_grpo.algorithms.llada_schedule import LLaDAJustGRPOSchedule
 from just_grpo.generation.llada import generate_llada
 
+from nemo_rl.algorithms.loss import ClippedPGLossConfig, ClippedPGLossFn
 from nemo_rl.distributed.batched_data_dict import BatchedDataDict
 
 
@@ -216,7 +217,7 @@ def test_production_accepts_128_dp_ranks_with_eight_completions_each(auxiliary):
 
 
 @pytest.mark.parametrize("stop_early", [False, True])
-def test_vllm_llada_requires_complete_canvas(stop_early):
+def test_vllm_llada_requires_complete_canvas(stop_early, monkeypatch):
     from pathlib import Path
 
     from just_grpo.config import validate_config
@@ -229,6 +230,7 @@ def test_vllm_llada_requires_complete_canvas(stop_early):
         / "configs/recipes"
         / "just_grpo-acecode-llada8b-2n8g-megatron-humaneval-vllm-smoke.yaml"
     )
+    monkeypatch.setenv("LLADA_CODE_SEQUENCE_LENGTH", "4096")
     config = load_config(recipe)
     if stop_early:
         config.policy.generation.stop_token_ids = [126081]
@@ -244,3 +246,77 @@ def test_vllm_llada_requires_complete_canvas(stop_early):
         decoding = variants["validation"]["vllm_kwargs"]["diffusion_config"]
         assert decoding["selection_policy"] == "leftmost"
         assert decoding["max_denoising_steps"] == decoding["canvas_length"]
+
+
+@pytest.mark.parametrize("importance_sampling", [False, True])
+@pytest.mark.parametrize("auxiliary", [False, True])
+def test_on_policy_ratio_preserves_canvas_gradients_and_kl(
+    importance_sampling: bool, auxiliary: bool
+) -> None:
+    data = batch()
+    schedule = LLaDAJustGRPOSchedule(data, canvas_length=4)
+    logits = torch.randn(
+        4, 2, 7, 100, generator=torch.Generator().manual_seed(17)
+    ).requires_grad_()
+    scores = (
+        logits.log_softmax(-1)
+        .gather(-1, data["input_ids"][None, ..., None].expand(4, -1, -1, 1))
+        .squeeze(-1)
+    )
+    old_scores = torch.zeros_like(data["token_mask"], dtype=torch.float32)
+    for step, level in enumerate(schedule.iter_levels(data)):
+        old_scores += scores[step].detach() * level["token_mask"]
+    # Keep a nonzero generation/training mismatch to exercise IS and KL.
+    data["generation_logprobs"] = old_scores - 0.02
+    outcomes = []
+    for force_ratio in (False, True):
+        data["prev_logprobs"] = (
+            torch.full_like(old_scores, float("nan")) if force_ratio else old_scores
+        )
+        loss_fn = ClippedPGLossFn(
+            ClippedPGLossConfig(
+                force_on_policy_ratio=force_ratio,
+                reference_policy_kl_penalty=0.0,
+                use_importance_sampling_correction=importance_sampling,
+                truncated_importance_sampling_ratio=None,
+                token_level_loss=True,
+            )
+        )
+        losses, generation_kl = [], 0.0
+        for step, level in enumerate(schedule.iter_levels(data)):
+            loss, metrics = loss_fn(
+                next_token_logprobs=scores[step],
+                data=level,
+                global_valid_seqs=data["sample_mask"].sum(),
+                global_valid_toks=data["token_mask"].sum(),
+                shift_labels=False,
+            )
+            losses.append(loss)
+            generation_kl += metrics["gen_kl_error"]
+        if auxiliary:
+            config = PositiveDiffusionConfig(mask_token_id=99, block_size=4, weight=0.2)
+            level, count = build_positive_diffusion_level(
+                data,
+                config,
+                pad_token_id=0,
+                padded_width=8,
+                stop_token_ids=[],
+                generator=torch.Generator().manual_seed(42),
+                layout=FullCanvasLayout(data, canvas_length=4),
+            )
+            aux_loss, _ = PositiveDiffusionLoss(config)(
+                level,
+                data["sample_mask"].sum(),
+                count,
+                next_token_logprobs=scores[0],
+                shift_labels=False,
+            )
+            losses.append(aux_loss)
+        total = sum(losses)
+        gradient = torch.autograd.grad(total, logits, retain_graph=True)[0]
+        outcomes.append((total.detach(), gradient, generation_kl))
+    torch.testing.assert_close(outcomes[0][0], outcomes[1][0])
+    torch.testing.assert_close(outcomes[0][1], outcomes[1][1])
+    assert outcomes[0][1].abs().sum() > 0
+    assert outcomes[0][2] > 0
+    assert outcomes[1][2] == pytest.approx(outcomes[0][2])

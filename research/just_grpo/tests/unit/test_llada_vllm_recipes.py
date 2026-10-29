@@ -53,6 +53,12 @@ def test_vllm_recipes_keep_greedy_validation_in_custom_adapter(
         )
     if dataset in ("math", "acecode") and not smoke:
         assert config.grpo.max_num_steps == 300
+    assert config.loss_fn.force_on_policy_ratio
+    assert config.grpo.seq_logprob_error_threshold is None
+    assert not config.grpo.async_grpo.enabled
+    assert config.policy.train_global_batch_size == (
+        config.grpo.num_prompts_per_step * config.grpo.num_generations_per_prompt
+    )
     assert diffusion.runtime == "reference_vllm"
     assert diffusion.validation_runtime == "megatron_llada"
     assert (

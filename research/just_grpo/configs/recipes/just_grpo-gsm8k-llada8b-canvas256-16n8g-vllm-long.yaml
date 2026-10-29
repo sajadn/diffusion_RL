@@ -1,6 +1,13 @@
 # vLLM full-canvas rollouts with greedy Megatron validation and an accuracy/NFE sweep.
 defaults: just_grpo-gsm8k-llada8b-canvas256-16n8g-megatron-inference-long.yaml
 
+grpo:
+  seq_logprob_error_threshold: null
+
+loss_fn:
+  # One synchronous update per rollout; reuse detached training logprobs.
+  force_on_policy_ratio: true
+
 just_grpo:
   # Replace the inherited T=1 mode names as well as their temperatures.
   _override_: true
